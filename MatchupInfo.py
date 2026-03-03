@@ -54,8 +54,6 @@ class MatchupInfo:
 
                         self.runMatchup(p, s, p2, s2)
                         self.runMatchupSwitchin(p, s, p2, s2)
-                break
-            break
 
         self.prunedMatchupInfo = self.makePrunedMatchupInfo()
 
@@ -111,6 +109,15 @@ class MatchupInfo:
             hpResults.append((p1HPPrecent, p2HPPrecent))
 
         return hpResults
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        del state['ipc']
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.ipc = None
 
     def makePrunedMatchupInfo(self):
         prunedMatchupInfo = defaultdict(dict)

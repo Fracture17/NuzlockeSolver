@@ -1,4 +1,5 @@
-TEAMS = "Bellossom||Leftovers|Chlorophyll|hiddenpowerfire,magicalleaf,moonlight,leechseed||85,,85,85,85,85||,2,,30,,30||93|]Sceptile||PetayaBerry|Overgrow|substitute,hiddenpowerice,leafblade,thunderpunch||81,,85,85,85,85||,2,30,,,||82|]Walrein||Leftovers|ThickFat|surf,icebeam,protect,toxic||85,,85,85,85,85||,0,,,,||80|]Magneton||Leftovers|MagnetPull|thunderbolt,hiddenpowerice,rest,sleeptalk||85,,85,85,85,85|N|,2,30,,,||85|]Noctowl||Leftovers|Insomnia|toxic,whirlwind,return,hiddenpowerfire||85,85,85,85,85,85||,30,,30,,30||92|]Linoone||SilkScarf|Pickup|bellydrum,hiddenpowerground,shadowball,extremespeed||81,85,85,85,85,85||,,,30,30,||82|"
+import pickle
 
-for x in TEAMS.split("]"):
-    print(x)
+with open("matchup_info.pkl", "rb") as f:
+    m = pickle.load(f)
+    print(m)

@@ -8,6 +8,10 @@ if __name__ == "__main__":
 
     m = MatchupInfo(ipc)
 
+    import pickle
+    with open("matchup_info.pkl", "wb") as f:
+        pickle.dump(m, f)
+
     quit()
 
     response = ipc.send({"new": True})
