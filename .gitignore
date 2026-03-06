@@ -26,3 +26,7 @@ htmlcov/
 Thumbs.db
 
 *.pkl
+
+matchup/*
+analysis/*
+raw_data/*

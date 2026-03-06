@@ -44,6 +44,7 @@ class MCTSNode:
         """Check if this is a terminal node (no children possible)."""
         return len(self.untried_actions) == 0 and len(self.children) == 0
 
+    #Returns None when node has no children, likely due to parallel workers
     def best_child(self, exploration_weight: float = 1.414) -> 'MCTSNode':
         """
         Select the best child using UCB1 formula.
@@ -54,8 +55,13 @@ class MCTSNode:
         Returns:
             Child node with highest UCB1 value
         """
+        #The only way this could called with no children is if the untried actions list is empty and the other workers aren't done yet
+        #So just return None in that case
+        if len(self.children) == 0:
+            return None
+
         return max(self.children,
-                   key=lambda child: child.ucb1(exploration_weight))
+                    key=lambda child: child.ucb1(exploration_weight))
 
     def ucb1(self, exploration_weight: float = 1.414) -> float:
         """
@@ -77,6 +83,8 @@ class MCTSNode:
         exploration = exploration_weight * math.sqrt(
             math.log(self.parent.visits) / self.visits
         )
+        #scale exploration
+        exploration *= 8
         return exploitation + exploration
 
 
@@ -188,9 +196,13 @@ class MCTS(ABC):
             self._backpropagate(node, reward)
 
         # Return best action (most visited child)
+        if not root.children:
+            actions = self.get_legal_actions(initial_state)
+            return (actions[0] if actions else None), root
         best_child = max(root.children, key=lambda c: c.visits)
         return best_child.action, root
 
+    #Returns None when a node has no children, likely due to parallel workers
     def _select(self, node: MCTSNode) -> MCTSNode:
         """
         Selection phase: traverse tree using UCB1 until we find a node to expand.
@@ -201,7 +213,7 @@ class MCTS(ABC):
         Returns:
             Node to expand
         """
-        while not self.is_terminal(node.state):
+        while node is not None and not self.is_terminal(node.state):
             if not node.is_fully_expanded():
                 return node
             else:
@@ -218,7 +230,7 @@ class MCTS(ABC):
         Returns:
             Newly created child node
         """
-        action = node.untried_actions.pop()
+        action = node.untried_actions.pop(0)
         next_state = self.apply_action(node.state, action)
         child_node = MCTSNode(
             state=next_state,

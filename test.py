@@ -9,7 +9,7 @@ if __name__ == "__main__":
     m = MatchupInfo(ipc)
 
     import pickle
-    with open("matchup_info.pkl", "wb") as f:
+    with open("matchup_info_60.pkl", "wb") as f:
         pickle.dump(m, f)
 
     quit()
