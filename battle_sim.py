@@ -10,7 +10,6 @@ import json
 import random
 import threading
 from concurrent.futures import ProcessPoolExecutor
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
 
@@ -23,41 +22,6 @@ from ai_flags import (
 from gen3_data import get_move_info
 from ai_switch import select_switch_in
 
-
-class _RWLock:
-    """Global reader-writer lock: concurrent reads, exclusive writer.
-
-    Uses threading.Semaphore (not Lock) for _write_sem so the semaphore
-    can be released by a different thread than the one that acquired it
-    (required for the reader pattern where the first reader acquires and
-    the last reader releases).
-    """
-    def __init__(self):
-        self._read_lock = threading.Lock()       # protects _readers count
-        self._write_sem = threading.Semaphore(1) # binary: 1=unlocked
-        self._readers = 0
-
-    @contextmanager
-    def read(self):
-        with self._read_lock:
-            self._readers += 1
-            if self._readers == 1:
-                self._write_sem.acquire()    # first reader blocks writers
-        try:
-            yield
-        finally:
-            with self._read_lock:
-                self._readers -= 1
-                if self._readers == 0:
-                    self._write_sem.release() # last reader unblocks writers
-
-    @contextmanager
-    def write(self):
-        self._write_sem.acquire()
-        try:
-            yield
-        finally:
-            self._write_sem.release()
 
 
 @dataclass
@@ -526,13 +490,12 @@ class PokemonMCTS(MCTS):
 
         root = MCTSNode(state=initial_state,
                         untried_actions=self.get_legal_actions(initial_state))
-        rwlock = _RWLock()
         sem = threading.Semaphore(iterations)
 
         threads = [
             threading.Thread(
                 target=_mcts_tree_worker,
-                args=(self.node_script_path, root, rwlock, sem, player,
+                args=(self.node_script_path, root, sem, player,
                       self.exploration_weight, self.simulation_depth_limit),
                 daemon=True,
             )
@@ -918,12 +881,14 @@ def _play_game_worker(node_script_path: str, player_str: str, opp_str: str,
         ipc.close()
 
 
-def _mcts_tree_worker(node_script_path, root, rwlock, sem, player,
+def _mcts_tree_worker(node_script_path, root, sem, player,
                       exploration_weight, depth_limit):
-    """Thread worker: runs MCTS iterations on the shared tree.
+    """Thread worker: runs MCTS iterations on the shared tree with per-node locking.
 
-    Each thread owns its IPC connection. Tree access is protected by rwlock.
-    Simulation runs without holding any lock.
+    Selection uses hand-over-hand locking (hold parent, acquire child, release parent).
+    Virtual loss and backpropagation use brief per-node locks to avoid bidirectional
+    deadlock with the downward selection phase.
+    Simulation runs without any lock.
     Requires PYTHON_GIL=0 (Python 3.13 free-threading) for true CPU parallelism.
     """
     from NodeIPC import NodeIPC as _NodeIPC
@@ -933,56 +898,55 @@ def _mcts_tree_worker(node_script_path, root, rwlock, sem, player,
                             simulation_depth_limit=depth_limit, num_workers=1)
 
         while sem.acquire(blocking=False):
+            # --- Phase 1: Selection with hand-over-hand locking (downward) ---
+            # Hold parent lock, acquire child lock, release parent.
+            action = None
+            node = root
             while True:
-                # Lock is required for whole section because unlocking and locking again can cause things to change
-                with rwlock.write():
-                    # --- Phase 1: Selection (read lock) ---
-                    node = local._select(root)
-                    #if got a node with no untried actions and no children, can't use it until other workers return
-                    if node is None:
-                        #Release lock and try code again
-                        continue
-                    game_over = local.is_terminal(node.state)
-                    has_untried = not game_over and bool(node.untried_actions)
+                node.lock.acquire()
+                game_over = local.is_terminal(node.state)
+                has_untried = not game_over and bool(node.untried_actions)
 
-                    # --- Phase 2a: Pop action (write lock) ---
-                    action = None
-                    #Don't need to re check because entire section is locked
-                    if node.untried_actions:
+                if game_over or has_untried:
+                    # Expansion point or terminal: pop action if available
+                    if has_untried:
                         action = node.untried_actions.pop(0)
+                    node.lock.release()
+                    break
 
-                break
+                # Fully expanded: descend to best child
+                next_node = node.best_child(local.exploration_weight)
+                if next_node is None:
+                    # All expansions in-flight, no children yet; release lock and try again without incrementing semaphore
+                    node.lock.release()
+                    continue
 
-            # --- Phase 2b: Expansion IPC call (no lock) ---
-            if action is not None:
-                new_state = local.apply_action(node.state, action)
+                node.lock.release()
+                node = next_node
 
-                # --- Phase 2c: Add child (write lock) ---
-                with rwlock.write():
-                    child = MCTSNode(state=new_state, parent=node, action=action,
-                                     untried_actions=local.get_legal_actions(new_state))
-                    node.children.append(child)
-                    node = child
-
-            # --- Phase 3: Apply virtual loss (write lock) ---
-            # Increment visits only — makes this path look already-visited under UCB,
-            # discouraging other threads from selecting it while simulation runs.
-            with rwlock.write():
-                n = node
-                while n is not None:
-                    n.visits += 1
-                    n = n.parent
+            # --- Phase 2a: Expansion IPC call (no lock) ---
+            new_state = local.apply_action(node.state, action)
 
             # --- Phase 4: Simulation (no lock) ---
-            reward = local._simulate(node.state, player)
+            reward = local._simulate(new_state, player)
 
-            # --- Phase 5: Backpropagate (write lock) ---
+            # --- Phase 5: Backpropagate (brief per-node locks, upward) ---
             # visits already incremented by virtual loss — only add reward.
-            with rwlock.write():
-                n = node
-                while n is not None:
+            n = node
+            while n is not None:
+                with n.lock:
+                    n.visits += 1
                     n.value += reward
-                    n = n.parent
+                n = n.parent
+
+            # --- Phase 2c: Add child (parent's lock) ---
+            child = MCTSNode(state=new_state, parent=node, action=action,
+                             untried_actions=local.get_legal_actions(new_state))
+            child.visits = 1
+            child.value = reward
+            with node.lock:
+                node.children.append(child)
+
     finally:
         ipc.close()
 

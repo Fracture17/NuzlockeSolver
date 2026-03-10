@@ -1,3 +1,8 @@
+import sys, os
+if getattr(sys, '_is_gil_enabled', lambda: False)():
+    os.environ['PYTHON_GIL'] = '0'
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
 """run_analysis.py — Full analysis pipeline.
 
 For each level multiplier (0.6, 0.7, 0.8, 0.9, 1.0):

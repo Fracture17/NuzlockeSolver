@@ -8,6 +8,7 @@ the abstract methods for their specific domain.
 
 import math
 import random
+import threading
 from abc import ABC, abstractmethod
 from typing import Any, List, Optional, Tuple
 
@@ -35,6 +36,7 @@ class MCTSNode:
         self.visits = 0
         self.value = 0.0
         self.untried_actions = untried_actions if untried_actions is not None else []
+        self.lock = threading.Lock()
 
     def is_fully_expanded(self) -> bool:
         """Check if all possible actions from this node have been tried."""
@@ -76,6 +78,8 @@ class MCTSNode:
         Returns:
             UCB1 value for this node
         """
+        self.lock.acquire()
+
         if self.visits == 0:
             return float('inf')
 
@@ -85,6 +89,9 @@ class MCTSNode:
         )
         #scale exploration
         exploration *= 8
+
+        self.lock.release()
+
         return exploitation + exploration
 
 

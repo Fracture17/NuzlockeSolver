@@ -12,6 +12,7 @@ build/
 .venv/
 venv/
 env/
+.venv_t/
 
 # PyCharm
 .idea/
