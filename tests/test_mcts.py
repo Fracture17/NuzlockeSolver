@@ -117,21 +117,21 @@ class TestMCTSNodeUCB1:
 
 class TestMCTSNodeHelpers:
 
-    def test_is_fully_expanded_no_untried(self):
-        node = MCTSNode(state=0, untried_actions=[])
-        assert node.is_fully_expanded()
+    def test_tried_actions_empty_on_init(self):
+        node = MCTSNode(state=0)
+        assert node.tried_actions == set()
 
-    def test_is_fully_expanded_has_untried(self):
-        node = MCTSNode(state=0, untried_actions=["move 1"])
-        assert not node.is_fully_expanded()
+    def test_tried_actions_is_set(self):
+        node = MCTSNode(state=0)
+        node.tried_actions.add("move 1")
+        assert "move 1" in node.tried_actions
+        assert "move 2" not in node.tried_actions
 
-    def test_is_terminal_no_children_no_untried(self):
-        node = MCTSNode(state=0, untried_actions=[])
-        assert node.is_terminal()
-
-    def test_is_terminal_false_when_untried(self):
-        node = MCTSNode(state=0, untried_actions=["move 1"])
-        assert not node.is_terminal()
+    def test_no_state_on_child_node(self):
+        parent = MCTSNode(state=42)
+        child = MCTSNode(state=None, parent=parent, action="move 1")
+        assert child.state is None
+        assert child.action == "move 1"
 
     def test_best_child_returns_highest_ucb1(self):
         root = MCTSNode(state=0)

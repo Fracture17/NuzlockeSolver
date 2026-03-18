@@ -41,10 +41,10 @@ from test2 import build_scores
 
 NODE_SCRIPT = "/home/Fracture/WebstormProjects/pokemon-showdown-master/Connection.js"
 
-LEVEL_MULTIPLIERS = [0.6, 0.7, 0.8, 0.9, 1.0]
-ITERATIONS = [100, 1000, 10000]
-DEPTHS = [0, 10, 20, 50, 100, 1000]
-NUM_WORKERS = 30
+LEVEL_MULTIPLIERS = [0.9, 1.0]
+ITERATIONS = [100, 1000]
+DEPTHS = [0, 10, 20]
+NUM_WORKERS = 1
 
 
 def _lv_str(multiplier: float) -> str:

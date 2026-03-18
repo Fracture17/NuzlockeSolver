@@ -104,12 +104,14 @@ class TestParseMoveActions:
         assert result == ["move 1", "move 3"]
 
     def test_fallback_on_empty_string(self):
+        # Empty string means all PP depleted; fall back to move 1 (triggers Struggle)
         result = parse_move_actions("")
-        assert result == ["move 1", "move 2", "move 3", "move 4"]
+        assert result == ["move 1"]
 
     def test_fallback_on_unparseable(self):
+        # Unparseable string similarly falls back to move 1
         result = parse_move_actions("???")
-        assert result == ["move 1", "move 2", "move 3", "move 4"]
+        assert result == ["move 1"]
 
 
 # ---------------------------------------------------------------------------

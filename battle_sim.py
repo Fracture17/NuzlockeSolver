@@ -9,6 +9,7 @@ move, or its first available switch if it has no moves (e.g. after a faint).
 import json
 import random
 import threading
+import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import Optional
@@ -24,6 +25,30 @@ from ai_switch import select_switch_in
 
 
 
+class TimingStats:
+    """Thread-safe accumulator for IPC call timing across multiple workers."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.ipc_time = 0.0
+        self.ipc_calls = 0
+
+    def add(self, elapsed: float) -> None:
+        with self._lock:
+            self.ipc_time += elapsed
+            self.ipc_calls += 1
+
+    def reset(self) -> None:
+        with self._lock:
+            self.ipc_time = 0.0
+            self.ipc_calls = 0
+
+    def snapshot(self):
+        """Return (ipc_time, ipc_calls) atomically."""
+        with self._lock:
+            return self.ipc_time, self.ipc_calls
+
+
 @dataclass
 class BattleResult:
     winner: str   # "p1", "p2", or "unknown"
@@ -37,8 +62,9 @@ class BattleResult:
 def parse_move_actions(moves_str: str) -> list:
     """Parse IPC p1Moves string ("1:2:3:4") into ["move 1", "move 2", ...].
 
-    Indices in the IPC string are 1-based colon-separated integers.
-    Falls back to ["move 1","move 2","move 3","move 4"] if no valid entries are parsed.
+    Indices in the IPC string are 0-based colon-separated integers.
+    Falls back to ["move 1"] if no valid entries are parsed (all PP depleted),
+    which causes the simulator to use Struggle.
     """
     actions = []
     for part in str(moves_str).split(':'):
@@ -46,7 +72,7 @@ def parse_move_actions(moves_str: str) -> list:
             actions.append(f"move {int(part.strip()) + 1}")
         except ValueError:
             pass
-    return actions if actions else [f"move {i}" for i in range(1, 5)]
+    return actions if actions else ["move 1"]
 
 
 def parse_switch_actions(switches_str: str) -> list:
@@ -471,54 +497,95 @@ class PokemonMCTS(MCTS):
     if it has no moves (e.g. after a faint), or nothing if it has neither.
     """
 
-    def __init__(self, ipc, node_script_path=None, num_workers=1, **kwargs):
+    def __init__(self, ipc, node_script_path=None, num_workers=1,
+                 forbidden_actions=None, reward_fn=None, rollout_reward_fn=None,
+                 greedy_rollout=False, timing_stats=None, **kwargs):
         """
         Args:
             ipc: NodeIPC instance for sending battle commands.
             node_script_path: Path to Connection.js. Required for parallel search.
             num_workers: Number of parallel MCTS search processes (root parallelism).
+            forbidden_actions: Optional set of action strings to exclude from legal actions.
+            reward_fn: Optional callable(state, player) to override get_reward.
+            rollout_reward_fn: Optional callable(state, player) to override get_reward_OLD.
             **kwargs: Forwarded to MCTS (exploration_weight, simulation_depth_limit).
         """
         super().__init__(**kwargs)
         self.ipc = ipc
         self.node_script_path = node_script_path
         self.num_workers = num_workers
+        self.forbidden_actions = forbidden_actions
+        self.reward_fn = reward_fn
+        self.rollout_reward_fn = rollout_reward_fn
+        self.greedy_rollout = greedy_rollout
+        self.timing_stats = timing_stats
 
-    def search(self, initial_state, iterations, player=1):
+    def search(self, initial_state, iterations, player=1, init_counter=0):
+        self._init_counter = init_counter
+
         if self.num_workers <= 1 or self.node_script_path is None:
-            return super().search(initial_state, iterations, player)
+            _, root = super().search(initial_state, iterations, player)
+        else:
+            root = MCTSNode(state=initial_state)
+            sem = threading.Semaphore(iterations)
 
-        root = MCTSNode(state=initial_state,
-                        untried_actions=self.get_legal_actions(initial_state))
-        sem = threading.Semaphore(iterations)
-
-        threads = [
-            threading.Thread(
-                target=_mcts_tree_worker,
-                args=(self.node_script_path, root, sem, player,
-                      self.exploration_weight, self.simulation_depth_limit),
-                daemon=True,
-            )
-            for _ in range(self.num_workers)
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+            threads = [
+                threading.Thread(
+                    target=_mcts_tree_worker,
+                    args=(self.node_script_path, root, sem, player,
+                          self.exploration_weight, self.simulation_depth_limit,
+                          self.reward_fn, self.rollout_reward_fn, init_counter,
+                          self.timing_stats),
+                    daemon=True,
+                )
+                for _ in range(self.num_workers)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
 
         if not root.children:
             actions = self.get_legal_actions(initial_state)
             return (actions[0] if actions else None), root
 
-        #Best action is one with highest average score (consistent with prior implementation)
-        #It's unlikely that a bad action just got lucky, since good states are visited often
-        #Value differences aren't extreme enough for it to be a lucky draw at the end
-        best = max(root.children,
-                   key=lambda c: c.value / c.visits if c.visits > 0 else float('-inf'))
-        return best.action, root
+        # Select best action by value/visits, with switch penalty applied on top
+        penalty = _compute_switch_penalty(init_counter, initial_state)
+        def adj(c):
+            base = c.value / c.visits if c.visits > 0 else float('-inf')
+            return base + (penalty if c.action and c.action.startswith("switch") else 0.0)
+        return max(root.children, key=adj).action, root
+
+    def _select(self, root):
+        """Selection phase with switch penalty applied to best_child exploration."""
+        node = root
+        state = root.state
+        counter = getattr(self, '_init_counter', 0)
+        while True:
+            if self.is_terminal(state):
+                return node, state
+            available = self.get_legal_actions(state)
+            untried = [a for a in available if a not in node.tried_actions]
+            if untried:
+                return node, state
+            best = node.best_child(
+                self.exploration_weight,
+                action_penalty_fn=lambda act, c=counter, s=state: (
+                    _compute_switch_penalty(c, s) if act.startswith("switch") else 0.0
+                ),
+            )
+            if best is None:
+                return node, state
+            state_before = state
+            state = self.apply_action(state, best.action)
+            counter = _update_counter(counter, state_before, state)
+            node = best
 
     def get_legal_actions(self, state: dict) -> list:
-        return state["p1_moves"] + state["p1_switches"]
+        actions = state["p1_moves"] + state["p1_switches"]
+        if self.forbidden_actions:
+            actions = [a for a in actions if a not in self.forbidden_actions]
+        return actions
 
     def _pick_p2_move(self, state: dict) -> Optional[str]:
         """Select the best move for p2 using ai_flags, falling back to first move."""
@@ -529,12 +596,25 @@ class PokemonMCTS(MCTS):
             return select_switch_in(state, state["p2_switches"], player=2)
         return None
 
+    def _pick_p1_move(self, state: dict) -> Optional[str]:
+        """Select the best move for p1 using ai_flags, falling back to first move."""
+        if state["p1_moves"]:
+            scored = select_move_with_ai_flags(state, state["p1_moves"], player=1)
+            return scored if scored is not None else state["p1_moves"][0]
+        if state["p1_switches"]:
+            return select_switch_in(state, state["p1_switches"], player=1)
+        return None
+
     def apply_action(self, state: dict, action: str) -> dict:
         data = {"battle": state["battle"], "p1": action}
         p2 = self._pick_p2_move(state)
         if p2 is not None:
             data["p2"] = p2
-        new_state = parse_ipc_response(self.ipc.send(data))
+        _t0 = time.perf_counter()
+        response = self.ipc.send(data)
+        if self.timing_stats is not None:
+            self.timing_stats.add(time.perf_counter() - _t0)
+        new_state = parse_ipc_response(response)
         # If only p2 needs to act (opponent forced switch), advance automatically.
         while (not new_state["is_over"]
                and not new_state["p1_moves"]
@@ -545,7 +625,11 @@ class PokemonMCTS(MCTS):
                 data["p2"] = p2
             else:
                 break
-            new_state = parse_ipc_response(self.ipc.send(data))
+            _t0 = time.perf_counter()
+            response = self.ipc.send(data)
+            if self.timing_stats is not None:
+                self.timing_stats.add(time.perf_counter() - _t0)
+            new_state = parse_ipc_response(response)
         return new_state
 
     def is_terminal(self, state: dict) -> bool:
@@ -553,6 +637,8 @@ class PokemonMCTS(MCTS):
 
     #new reward function, designed to give an immediate heuristic without playouts
     def get_reward(self, state: dict, player: int = 1) -> float:
+        if self.reward_fn is not None:
+            return self.reward_fn(state, player)
         sides = state["battle"].get("sides", [])
 
         def hp_fraction(pokemon):
@@ -604,10 +690,17 @@ class PokemonMCTS(MCTS):
         score -= p1PPScore / 10
         score += p2PPScore
 
+        numP1Boosts = sum(sum(p["boosts"].values()) for p in p1_pokemon if p["isActive"])
+        numP2Boosts = sum(sum(p["boosts"].values()) for p in p2_pokemon if p["isActive"])
+        score += numP1Boosts * .2
+        score -= numP2Boosts * .2
+
         return score if player == 1 else -score
 
     #old function, designed to work with random playouts
     def get_reward_OLD(self, state: dict, player: int = 1) -> float:
+        if self.rollout_reward_fn is not None:
+            return self.rollout_reward_fn(state, player)
         sides = state["battle"].get("sides", [])
         if len(sides) < 2:
             return 0.0
@@ -637,24 +730,32 @@ class PokemonMCTS(MCTS):
         return score if player == 1 else -score
 
     def _simulate(self, state: dict, player: int) -> float:
-        """Rollout with full one-step lookahead: try all p1 actions, pick best by get_reward."""
+        """Rollout until terminal or depth limit.
+
+        greedy_rollout=True:  try all p1 actions, pick the one with best immediate get_reward.
+        greedy_rollout=False: use ai_flags to select p1's action (faster, same logic as p2).
+        """
         current = state
         depth = 0
         while not self.is_terminal(current) and depth < self.simulation_depth_limit:
-            p1_actions = current["p1_moves"] + current["p1_switches"]
-            if not p1_actions:
-                break
-
-            best_next = None
-            best_score = float("-inf")
-            for action in p1_actions:
-                next_state = self.apply_action(current, action)
-                score = self.get_reward(next_state, player)
-                if score > best_score:
-                    best_score = score
-                    best_next = next_state
-
-            current = best_next
+            if self.greedy_rollout:
+                p1_actions = current["p1_moves"] + current["p1_switches"]
+                if not p1_actions:
+                    break
+                best_next = None
+                best_score = float("-inf")
+                for action in p1_actions:
+                    next_state = self.apply_action(current, action)
+                    score = self.get_reward(next_state, player)
+                    if score > best_score:
+                        best_score = score
+                        best_next = next_state
+                current = best_next
+            else:
+                action = self._pick_p1_move(current)
+                if action is None:
+                    break
+                current = self.apply_action(current, action)
             depth += 1
 
         return self.get_reward_OLD(current, player)
@@ -771,6 +872,10 @@ def play_game(ipc, player_team_str: str, opp_team_str: str,
               record_path: Optional[str] = None) -> BattleResult:
     """Play one full battle, selecting player actions with MCTS.
 
+    Always writes per-turn debug files (cleared at battle start):
+      debug_summary.txt — human-readable turn summaries
+      debug_state.json  — pretty-printed raw battle state
+
     Args:
         ipc: NodeIPC instance.
         player_team_str: IPC team string for the player.
@@ -796,7 +901,22 @@ def play_game(ipc, player_team_str: str, opp_team_str: str,
         p1_team_info = _snapshot_team_info(initial_sides[0] if initial_sides else {})
         p2_team_info = _snapshot_team_info(initial_sides[1] if len(initial_sides) > 1 else {})
 
+    # Open debug files (cleared each battle)
+    summary_file = open("debug_summary.txt", "w", encoding="utf-8")
+    state_file = open("debug_state.json", "w", encoding="utf-8")
+
+    # Set up timing stats for this game
+    timing = TimingStats()
+    prev_timing_stats = mcts.timing_stats
+    mcts.timing_stats = timing
+    total_ipc_time = 0.0
+    total_wall_time = 0.0
+
+    counter = 0  # tracks consecutive turns without opponent progress
     while not mcts.is_terminal(state):
+        turn_wall_start = time.perf_counter()
+        timing.reset()
+
         if recording:
             battle = state["battle"]
             sides = battle.get("sides", [])
@@ -809,7 +929,7 @@ def play_game(ipc, player_team_str: str, opp_team_str: str,
             p1_party = _snapshot_party(p1_side)
             p2_party = _snapshot_party(p2_side)
             log_before = len(battle.get("log", []))
-            action, root = mcts.search(state, mcts_iterations)
+            action, root = mcts.search(state, mcts_iterations, init_counter=counter)
             chosen_display = _resolve_action_name(action, state)
             stats_raw = mcts.get_action_statistics(root)
             action_stats = [
@@ -825,10 +945,38 @@ def play_game(ipc, player_team_str: str, opp_team_str: str,
 
             print(turns, action, chosen_display, action_stats)
         else:
-            action = mcts.get_best_action(state, mcts_iterations)
+            action, _ = mcts.search(state, mcts_iterations, init_counter=counter)
 
+        state_before = state
+        log_before_debug = len(state_before["battle"].get("log", []))
         state = mcts.apply_action(state, action)
+        counter = _update_counter(counter, state_before, state)
         turns += 1
+
+        turn_wall = time.perf_counter() - turn_wall_start
+        ipc_t, ipc_n = timing.snapshot()
+        total_ipc_time += ipc_t
+        total_wall_time += turn_wall
+        thread_time = turn_wall * mcts.num_workers
+        pct = (ipc_t / thread_time * 100) if thread_time > 0 else 0.0
+        print(f"  [timing] turn {turns}: IPC {ipc_t:.3f}s ({ipc_n} calls) "
+              f"| wall {turn_wall:.3f}s | {pct:.1f}% (×{mcts.num_workers} workers)")
+
+        log_lines_this_turn = state["battle"].get("log", [])[log_before_debug:]
+        summary_file.write(_format_debug_turn(
+            turns, counter, action,
+            state_before["p1_moves"], state_before["p1_switches"],
+            state_before["p2_moves"], state_before["p2_switches"],
+            state_before["battle"], state["battle"],
+            log_lines_this_turn,
+        ))
+        summary_file.flush()
+        state_file.write(f"=== Turn {turns} ===\n")
+        state_file.write("-- BEFORE --\n")
+        state_file.write(json.dumps(state_before["battle"], indent=2) + "\n")
+        state_file.write("-- AFTER --\n")
+        state_file.write(json.dumps(state["battle"], indent=2) + "\n\n")
+        state_file.flush()
 
         if recording:
             new_log = state["battle"].get("log", [])[log_before:]
@@ -844,6 +992,15 @@ def play_game(ipc, player_team_str: str, opp_team_str: str,
                 "chosen_display": chosen_display,
                 "log_lines": new_log,
             })
+
+    mcts.timing_stats = prev_timing_stats
+    summary_file.close()
+    state_file.close()
+    total_thread_time = total_wall_time * mcts.num_workers
+    total_pct = (total_ipc_time / total_thread_time * 100) if total_thread_time > 0 else 0.0
+    print(f"  [timing] game total: IPC {total_ipc_time:.3f}s "
+          f"| wall {total_wall_time:.3f}s "
+          f"| {total_pct:.1f}% of wall×workers")
 
     battle_result = BattleResult(
         winner=state["winner"] or "unknown",
@@ -881,8 +1038,112 @@ def _play_game_worker(node_script_path: str, player_str: str, opp_str: str,
         ipc.close()
 
 
+def _format_debug_turn(turn, counter, action, p1_moves, p1_switches,
+                       p2_moves, p2_switches, battle_before, battle_after,
+                       log_lines) -> str:
+    """Format one turn's debug info as human-readable text."""
+    lines = []
+    divider = "=" * 60
+    lines.append(divider)
+    lines.append(f"Turn {turn}  |  switch_counter={counter}  |  action: {action}")
+    lines.append(divider)
+
+    def fmt_side(battle, player_label, legal_m, legal_s):
+        sides = battle.get("sides", [{}, {}])
+        side_idx = 0 if player_label == "P1" else 1
+        side = sides[side_idx] if len(sides) > side_idx else {}
+        active = _get_active_pokemon(side)
+        pokemon_list = side.get("pokemon", [])
+
+        out = []
+        # Legal actions
+        legal = legal_m + legal_s if legal_m is not None else []
+        out.append(f"  Legal {player_label}: {', '.join(legal) if legal else '(none)'}")
+        out.append("")
+
+        # Active pokemon
+        if active:
+            name = active.get("name") or active.get("species", "?")
+            hp = active.get("hp", 0)
+            maxhp = active.get("maxhp", 1) or 1
+            status = active.get("status", "") or "-"
+            out.append(f"  {player_label} Active: {name}  HP: {hp}/{maxhp}  status: {status}")
+            boosts = active.get("boosts", {})
+            boost_parts = [f"{k}{'+'if v>0 else ''}{v}" for k, v in boosts.items() if v != 0]
+            if boost_parts:
+                out.append(f"    Boosts: {' '.join(boost_parts)}")
+            for i, ms in enumerate(active.get("moveSlots", []), 1):
+                pp = ms.get("pp", "?")
+                maxpp = ms.get("maxpp", "?")
+                move_name = ms.get("move", ms.get("id", "?"))
+                flag = "  <- 0 PP" if pp == 0 else ""
+                out.append(f"    [move {i}] {move_name:<20} pp: {pp}/{maxpp}{flag}")
+
+        # Bench
+        bench = [p for p in pokemon_list if not p.get("isActive")]
+        if bench:
+            out.append(f"  {player_label} Bench:")
+            for p in bench:
+                name = p.get("name") or p.get("species", "?")
+                hp = p.get("hp", 0)
+                maxhp = p.get("maxhp", 1) or 1
+                fainted = "  FAINTED" if hp <= 0 else ""
+                out.append(f"    {name:<16} HP: {hp}/{maxhp}{fainted}")
+        return out
+
+    lines.append("")
+    lines.append("--- BEFORE ---")
+    lines.extend(fmt_side(battle_before, "P1", p1_moves, p1_switches))
+    lines.append("")
+    lines.extend(fmt_side(battle_before, "P2", p2_moves, p2_switches))
+
+    lines.append("")
+    lines.append("--- AFTER ---")
+    lines.extend(fmt_side(battle_after, "P1", None, None))
+    lines.append("")
+    lines.extend(fmt_side(battle_after, "P2", None, None))
+
+    lines.append("")
+    lines.append("  Battle log:")
+    for entry in log_lines:
+        lines.append(f"    {entry}")
+
+    is_over = battle_after.get("ended", False) or not battle_after.get("sides")
+    lines.append("")
+    lines.append(f"  is_over: {is_over}")
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def _compute_switch_penalty(counter: int, state: dict) -> float:
+    """Penalty term added to switch action scores: -0.5*counter^2 - p1_boost_sum*0.1."""
+    sides = state["battle"].get("sides", [])
+    active = _get_active_pokemon(sides[0]) if sides else None
+    p1_boost_sum = sum(active.get("boosts", {}).values()) if active else 0
+    return -0.5 * counter ** 2 - p1_boost_sum * 0.1
+
+
+def _update_counter(counter: int, state_before: dict, state_after: dict) -> int:
+    """Increment the wasted-turn counter unless progress was made or opponent switched.
+
+    Resets to 0 if: opponent HP fell, opponent gained a status, or opponent switched.
+    """
+    sides_b = state_before["battle"].get("sides", [{}, {}])
+    sides_a = state_after["battle"].get("sides", [{}, {}])
+    opp_b = _get_active_pokemon(sides_b[1]) if len(sides_b) > 1 else None
+    opp_a = _get_active_pokemon(sides_a[1]) if len(sides_a) > 1 else None
+    if opp_b is None or opp_a is None:
+        return counter + 1
+    opp_switched = opp_b.get("name") != opp_a.get("name")
+    hp_fell = opp_a.get("hp", 0) < opp_b.get("hp", 0)
+    got_status = opp_b.get("status", "") == "" and opp_a.get("status", "") != ""
+    return 0 if (hp_fell or got_status or opp_switched) else counter + 1
+
+
 def _mcts_tree_worker(node_script_path, root, sem, player,
-                      exploration_weight, depth_limit):
+                      exploration_weight, depth_limit,
+                      reward_fn=None, rollout_reward_fn=None, init_counter=0,
+                      timing_stats=None):
     """Thread worker: runs MCTS iterations on the shared tree with per-node locking.
 
     Selection uses hand-over-hand locking (hold parent, acquire child, release parent).
@@ -895,43 +1156,63 @@ def _mcts_tree_worker(node_script_path, root, sem, player,
     ipc = _NodeIPC(node_script_path)
     try:
         local = PokemonMCTS(ipc, exploration_weight=exploration_weight,
-                            simulation_depth_limit=depth_limit, num_workers=1)
+                            simulation_depth_limit=depth_limit, num_workers=1,
+                            reward_fn=reward_fn, rollout_reward_fn=rollout_reward_fn,
+                            timing_stats=timing_stats)
 
         while sem.acquire(blocking=False):
-            # --- Phase 1: Selection with hand-over-hand locking (downward) ---
-            # Hold parent lock, acquire child lock, release parent.
+            # --- Phase 1: Selection (re-simulate each action for fresh RNG) ---
             action = None
             node = root
+            state = root.state  # thread-local state carried through traversal
+            counter = init_counter  # thread-local switch penalty counter
+
             while True:
                 node.lock.acquire()
-                game_over = local.is_terminal(node.state)
-                has_untried = not game_over and bool(node.untried_actions)
+                game_over = local.is_terminal(state)
 
-                if game_over or has_untried:
-                    # Expansion point or terminal: pop action if available
-                    if has_untried:
-                        action = node.untried_actions.pop(0)
+                if game_over:
                     node.lock.release()
                     break
 
-                # Fully expanded: descend to best child
-                next_node = node.best_child(local.exploration_weight)
+                available = local.get_legal_actions(state)
+                untried = [a for a in available if a not in node.tried_actions]
+
+                if untried:
+                    action = untried[0]
+                    node.tried_actions.add(action)
+                    node.lock.release()
+                    break
+
+                # Fully expanded: descend to best child with switch penalty
+                next_node = node.best_child(
+                    local.exploration_weight,
+                    action_penalty_fn=lambda act, c=counter, s=state: (
+                        _compute_switch_penalty(c, s) if act.startswith("switch") else 0.0
+                    ),
+                )
                 if next_node is None:
-                    # All expansions in-flight, no children yet; release lock and try again without incrementing semaphore
+                    # All expansions in-flight, no children yet; retry selection
                     node.lock.release()
                     continue
 
                 node.lock.release()
+                # Re-simulate this action to advance state (fresh RNG each visit)
+                state_before = state
+                state = local.apply_action(state, next_node.action)
+                counter = _update_counter(counter, state_before, state)
                 node = next_node
 
-            # --- Phase 2a: Expansion IPC call (no lock) ---
-            new_state = local.apply_action(node.state, action)
+            if action is None:
+                continue  # terminal node; nothing to expand
 
-            # --- Phase 4: Simulation (no lock) ---
+            # --- Phase 2: Expansion IPC call (no lock) ---
+            new_state = local.apply_action(state, action)
+
+            # --- Phase 3: Simulation (no lock) ---
             reward = local._simulate(new_state, player)
 
-            # --- Phase 5: Backpropagate (brief per-node locks, upward) ---
-            # visits already incremented by virtual loss — only add reward.
+            # --- Phase 4: Backpropagate (brief per-node locks, upward) ---
             n = node
             while n is not None:
                 with n.lock:
@@ -939,9 +1220,8 @@ def _mcts_tree_worker(node_script_path, root, sem, player,
                     n.value += reward
                 n = n.parent
 
-            # --- Phase 2c: Add child (parent's lock) ---
-            child = MCTSNode(state=new_state, parent=node, action=action,
-                             untried_actions=local.get_legal_actions(new_state))
+            # --- Phase 5: Add child (parent's lock) ---
+            child = MCTSNode(state=None, parent=node, action=action)
             child.visits = 1
             child.value = reward
             with node.lock:

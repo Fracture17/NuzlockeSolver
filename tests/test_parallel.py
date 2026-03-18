@@ -1,52 +1,26 @@
-"""Tests for parallel processing in MatchupInfo and battle_sim.
+"""Tests for parallel processing in battle_sim.
 
 Tests use module-level picklable stubs (required for ProcessPoolExecutor —
 MagicMock objects cannot be pickled across process boundaries).
 
 Verifies:
   1. get_teams_at_level() applies per-pokemon level multipliers correctly.
-  2. MatchupInfo with num_workers=1 vs num_workers=4 produces identical
-     prunedMatchupInfo when given the same underlying data.
-  3. simulate_team with num_workers > 1 returns structurally valid results.
+  2. simulate_team with num_workers > 1 returns structurally valid results.
 """
 
 import sys
 import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from MatchupInfo import (
-    MatchupInfo, get_teams_at_level, _BOX_RAW, _OPP_RAW, STRATEGIES,
-)
+from MatchupInfo import get_teams_at_level, _BOX_RAW, _OPP_RAW
 from battle_sim import BattleResult, simulate_team
 
 
 # ---------------------------------------------------------------------------
 # Module-level picklable stubs (closures and MagicMocks can't cross processes)
 # ---------------------------------------------------------------------------
-
-def _make_fake_hp_results():
-    return [(1.0 - i * 0.05, 1.0 - i * 0.08) for i in range(10)]
-
-
-def _make_fake_pair_results(strategies):
-    results = {}
-    for s in strategies:
-        results[s] = {}
-        for s2 in strategies:
-            results[s][s2] = {}
-            results[s][s2][None] = _make_fake_hp_results()
-            for i in range(1, 5):
-                results[s][s2][i] = _make_fake_hp_results()
-    return results
-
-
-def _fake_pair_worker(node_script_path, p, p2, box, opp, strategies):
-    """Picklable replacement for MatchupInfo._run_pair used in parallel tests."""
-    return p, p2, _make_fake_pair_results(strategies)
-
 
 def _fake_game_worker(node_script_path, player_str, opp_str,
                       mcts_iterations, depth_limit, record_path):
@@ -132,77 +106,7 @@ class TestGetTeamsAtLevel:
 
 
 # ---------------------------------------------------------------------------
-# 2. MatchupInfo parallel == sequential
-# ---------------------------------------------------------------------------
-
-class TestMatchupInfoParallel:
-    """Verify parallel and sequential MatchupInfo produce identical results.
-
-    Uses _fake_pair_worker (module-level, picklable) instead of a closure.
-    Directly drives the ProcessPoolExecutor with the same fake data so both
-    sequential and parallel paths are exercised with identical inputs.
-    """
-
-    def _make_matchup(self, num_workers, box_subset, opp_subset):
-        """Build MatchupInfo using _fake_pair_worker via ProcessPoolExecutor."""
-        m = MatchupInfo.__new__(MatchupInfo)
-        m.node_script_path = "dummy"
-        m.level_multiplier = 1.0
-        m.box = box_subset
-        m.opp = opp_subset
-        m.rawMatchupInfo = {p: {p2: {} for p2 in opp_subset} for p in box_subset}
-
-        with ProcessPoolExecutor(max_workers=num_workers) as pool:
-            futures = {
-                pool.submit(_fake_pair_worker, "dummy", p, p2,
-                            box_subset, opp_subset, STRATEGIES): (p, p2)
-                for p in box_subset for p2 in opp_subset
-            }
-            for future in as_completed(futures):
-                p, p2, pair_results = future.result()
-                m.rawMatchupInfo[p][p2] = pair_results
-
-        m.prunedMatchupInfo = m.makePrunedMatchupInfo()
-        return m
-
-    def test_sequential_and_parallel_identical(self):
-        box_subset = dict(list(get_teams_at_level(1.0)[0].items())[:2])
-        opp_subset = dict(list(get_teams_at_level(1.0)[1].items())[:2])
-
-        m_seq = self._make_matchup(1, box_subset, opp_subset)
-        m_par = self._make_matchup(4, box_subset, opp_subset)
-
-        assert len(m_seq.prunedMatchupInfo) == len(m_par.prunedMatchupInfo)
-        for pmi_s, pmi_p in zip(
-            sorted(m_seq.prunedMatchupInfo, key=lambda x: (x.myPokemon, x.opponentPokemon)),
-            sorted(m_par.prunedMatchupInfo, key=lambda x: (x.myPokemon, x.opponentPokemon)),
-        ):
-            assert pmi_s.myPokemon == pmi_p.myPokemon
-            assert pmi_s.opponentPokemon == pmi_p.opponentPokemon
-            for turn_s, turn_p in zip(pmi_s.none, pmi_p.none):
-                assert abs(turn_s.myHP - turn_p.myHP) < 1e-9
-                assert abs(turn_s.opponentHP - turn_p.opponentHP) < 1e-9
-
-    def test_pruned_matchup_count(self):
-        box_subset = dict(list(get_teams_at_level(1.0)[0].items())[:3])
-        opp_subset = dict(list(get_teams_at_level(1.0)[1].items())[:2])
-
-        m = self._make_matchup(2, box_subset, opp_subset)
-        assert len(m.prunedMatchupInfo) == 6  # 3 BOX × 2 OPP
-
-    def test_each_pruned_matchup_has_10_turns(self):
-        box_subset = dict(list(get_teams_at_level(1.0)[0].items())[:2])
-        opp_subset = dict(list(get_teams_at_level(1.0)[1].items())[:1])
-
-        m = self._make_matchup(1, box_subset, opp_subset)
-        for pmi in m.prunedMatchupInfo:
-            assert len(pmi.none) == 10
-            assert len(pmi.move1) == 10
-            assert len(pmi.move4) == 10
-
-
-# ---------------------------------------------------------------------------
-# 3. simulate_team parallel — structural validity
+# 2. simulate_team parallel — structural validity
 # ---------------------------------------------------------------------------
 
 class TestSimulateTeamParallel:

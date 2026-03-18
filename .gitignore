@@ -31,3 +31,5 @@ Thumbs.db
 matchup/*
 analysis/*
 raw_data/*
+
+debug.ndjson

@@ -1,0 +1,1374 @@
+{
+  "1": {
+    "0": "Overgrow"
+  },
+  "2": {
+    "0": "Overgrow"
+  },
+  "3": {
+    "0": "Overgrow"
+  },
+  "4": {
+    "0": "Blaze"
+  },
+  "5": {
+    "0": "Blaze"
+  },
+  "6": {
+    "0": "Blaze"
+  },
+  "7": {
+    "0": "Torrent"
+  },
+  "8": {
+    "0": "Torrent"
+  },
+  "9": {
+    "0": "Torrent"
+  },
+  "10": {
+    "0": "Shield Dust"
+  },
+  "11": {
+    "0": "Shed Skin"
+  },
+  "12": {
+    "0": "Compound Eyes"
+  },
+  "13": {
+    "0": "Shield Dust"
+  },
+  "14": {
+    "0": "Shed Skin"
+  },
+  "15": {
+    "0": "Swarm"
+  },
+  "16": {
+    "0": "Keen Eye",
+    "1": "Tangled Feet"
+  },
+  "17": {
+    "0": "Keen Eye",
+    "1": "Tangled Feet"
+  },
+  "18": {
+    "0": "Keen Eye",
+    "1": "Tangled Feet"
+  },
+  "19": {
+    "0": "Run Away",
+    "1": "Guts"
+  },
+  "20": {
+    "0": "Run Away",
+    "1": "Guts"
+  },
+  "21": {
+    "0": "Keen Eye"
+  },
+  "22": {
+    "0": "Keen Eye"
+  },
+  "23": {
+    "0": "Intimidate",
+    "1": "Shed Skin"
+  },
+  "24": {
+    "0": "Intimidate",
+    "1": "Shed Skin"
+  },
+  "25": {
+    "0": "Static"
+  },
+  "26": {
+    "0": "Static"
+  },
+  "27": {
+    "0": "Sand Veil"
+  },
+  "28": {
+    "0": "Sand Veil"
+  },
+  "29": {
+    "0": "Poison Point",
+    "1": "Rivalry"
+  },
+  "30": {
+    "0": "Poison Point",
+    "1": "Rivalry"
+  },
+  "31": {
+    "0": "Poison Point",
+    "1": "Rivalry"
+  },
+  "32": {
+    "0": "Poison Point",
+    "1": "Rivalry"
+  },
+  "33": {
+    "0": "Poison Point",
+    "1": "Rivalry"
+  },
+  "34": {
+    "0": "Poison Point",
+    "1": "Rivalry"
+  },
+  "35": {
+    "0": "Cute Charm",
+    "1": "Magic Guard"
+  },
+  "36": {
+    "0": "Cute Charm",
+    "1": "Magic Guard"
+  },
+  "37": {
+    "0": "Flash Fire"
+  },
+  "38": {
+    "0": "Flash Fire"
+  },
+  "39": {
+    "0": "Cute Charm"
+  },
+  "40": {
+    "0": "Cute Charm"
+  },
+  "41": {
+    "0": "Inner Focus"
+  },
+  "42": {
+    "0": "Inner Focus"
+  },
+  "43": {
+    "0": "Chlorophyll"
+  },
+  "44": {
+    "0": "Chlorophyll"
+  },
+  "45": {
+    "0": "Chlorophyll"
+  },
+  "46": {
+    "0": "Effect Spore",
+    "1": "Dry Skin"
+  },
+  "47": {
+    "0": "Effect Spore",
+    "1": "Dry Skin"
+  },
+  "48": {
+    "0": "Compound Eyes",
+    "1": "Tinted Lens"
+  },
+  "49": {
+    "0": "Shield Dust",
+    "1": "Tinted Lens"
+  },
+  "50": {
+    "0": "Sand Veil",
+    "1": "Arena Trap"
+  },
+  "51": {
+    "0": "Sand Veil",
+    "1": "Arena Trap"
+  },
+  "52": {
+    "0": "Pickup",
+    "1": "Technician"
+  },
+  "53": {
+    "0": "Limber",
+    "1": "Technician"
+  },
+  "54": {
+    "0": "Damp",
+    "1": "Cloud Nine"
+  },
+  "55": {
+    "0": "Damp",
+    "1": "Cloud Nine"
+  },
+  "56": {
+    "0": "Vital Spirit",
+    "1": "Anger Point"
+  },
+  "57": {
+    "0": "Vital Spirit",
+    "1": "Anger Point"
+  },
+  "58": {
+    "0": "Intimidate",
+    "1": "Flash Fire"
+  },
+  "59": {
+    "0": "Intimidate",
+    "1": "Flash Fire"
+  },
+  "60": {
+    "0": "Water Absorb",
+    "1": "Damp"
+  },
+  "61": {
+    "0": "Water Absorb",
+    "1": "Damp"
+  },
+  "62": {
+    "0": "Water Absorb",
+    "1": "Damp"
+  },
+  "63": {
+    "0": "Synchronize",
+    "1": "Inner Focus"
+  },
+  "64": {
+    "0": "Synchronize",
+    "1": "Inner Focus"
+  },
+  "65": {
+    "0": "Synchronize",
+    "1": "Inner Focus"
+  },
+  "66": {
+    "0": "Guts",
+    "1": "No Guard"
+  },
+  "67": {
+    "0": "Guts",
+    "1": "No Guard"
+  },
+  "68": {
+    "0": "Guts",
+    "1": "No Guard"
+  },
+  "69": {
+    "0": "Chlorophyll"
+  },
+  "70": {
+    "0": "Chlorophyll"
+  },
+  "71": {
+    "0": "Chlorophyll"
+  },
+  "72": {
+    "0": "Clear Body",
+    "1": "Liquid Ooze"
+  },
+  "73": {
+    "0": "Clear Body",
+    "1": "Liquid Ooze"
+  },
+  "74": {
+    "0": "Rock Head",
+    "1": "Sturdy"
+  },
+  "75": {
+    "0": "Rock Head",
+    "1": "Sturdy"
+  },
+  "76": {
+    "0": "Rock Head",
+    "1": "Sturdy"
+  },
+  "77": {
+    "0": "Run Away",
+    "1": "Flash Fire"
+  },
+  "78": {
+    "0": "Run Away",
+    "1": "Flash Fire"
+  },
+  "79": {
+    "0": "Oblivious",
+    "1": "Own Tempo"
+  },
+  "80": {
+    "0": "Oblivious",
+    "1": "Own Tempo"
+  },
+  "81": {
+    "0": "Magnet Pull",
+    "1": "Sturdy"
+  },
+  "82": {
+    "0": "Magnet Pull",
+    "1": "Sturdy"
+  },
+  "83": {
+    "0": "Keen Eye",
+    "1": "Inner Focus"
+  },
+  "84": {
+    "0": "Run Away",
+    "1": "Early Bird"
+  },
+  "85": {
+    "0": "Run Away",
+    "1": "Early Bird"
+  },
+  "86": {
+    "0": "Thick Fat",
+    "1": "Hydration"
+  },
+  "87": {
+    "0": "Thick Fat",
+    "1": "Hydration"
+  },
+  "88": {
+    "0": "Stench",
+    "1": "Sticky Hold"
+  },
+  "89": {
+    "0": "Stench",
+    "1": "Sticky Hold"
+  },
+  "90": {
+    "0": "Shell Armor",
+    "1": "Skill Link"
+  },
+  "91": {
+    "0": "Shell Armor",
+    "1": "Skill Link"
+  },
+  "92": {
+    "0": "Levitate"
+  },
+  "93": {
+    "0": "Levitate"
+  },
+  "94": {
+    "0": "Levitate"
+  },
+  "95": {
+    "0": "Rock Head",
+    "1": "Sturdy"
+  },
+  "96": {
+    "0": "Insomnia",
+    "1": "Forewarn"
+  },
+  "97": {
+    "0": "Insomnia",
+    "1": "Forewarn"
+  },
+  "98": {
+    "0": "Hyper Cutter",
+    "1": "Shell Armor"
+  },
+  "99": {
+    "0": "Hyper Cutter",
+    "1": "Shell Armor"
+  },
+  "100": {
+    "0": "Soundproof",
+    "1": "Static"
+  },
+  "101": {
+    "0": "Soundproof",
+    "1": "Static"
+  },
+  "102": {
+    "0": "Chlorophyll"
+  },
+  "103": {
+    "0": "Chlorophyll"
+  },
+  "104": {
+    "0": "Rock Head",
+    "1": "Lightning Rod"
+  },
+  "105": {
+    "0": "Rock Head",
+    "1": "Lightning Rod"
+  },
+  "106": {
+    "0": "Limber",
+    "1": "Reckless"
+  },
+  "107": {
+    "0": "Keen Eye",
+    "1": "Iron Fist"
+  },
+  "108": {
+    "0": "Own Tempo",
+    "1": "Oblivious"
+  },
+  "109": {
+    "0": "Levitate"
+  },
+  "110": {
+    "0": "Levitate"
+  },
+  "111": {
+    "0": "Lightning Rod",
+    "1": "Rock Head"
+  },
+  "112": {
+    "0": "Lightning Rod",
+    "1": "Rock Head"
+  },
+  "113": {
+    "0": "Natural Cure",
+    "1": "Serene Grace"
+  },
+  "114": {
+    "0": "Chlorophyll",
+    "1": "Leaf Guard"
+  },
+  "115": {
+    "0": "Early Bird",
+    "1": "Scrappy"
+  },
+  "116": {
+    "0": "Swift Swim",
+    "1": "Sniper"
+  },
+  "117": {
+    "0": "Poison Point",
+    "1": "Sniper"
+  },
+  "118": {
+    "0": "Swift Swim",
+    "1": "Water Veil"
+  },
+  "119": {
+    "0": "Swift Swim",
+    "1": "Water Veil"
+  },
+  "120": {
+    "0": "Illuminate",
+    "1": "Natural Cure"
+  },
+  "121": {
+    "0": "Illuminate",
+    "1": "Natural Cure"
+  },
+  "122": {
+    "0": "Soundproof",
+    "1": "Filter"
+  },
+  "123": {
+    "0": "Swarm",
+    "1": "Technician"
+  },
+  "124": {
+    "0": "Oblivious",
+    "1": "Forewarn"
+  },
+  "125": {
+    "0": "Static"
+  },
+  "126": {
+    "0": "Flame Body"
+  },
+  "127": {
+    "0": "Hyper Cutter",
+    "1": "Mold Breaker"
+  },
+  "128": {
+    "0": "Intimidate",
+    "1": "Anger Point"
+  },
+  "129": {
+    "0": "Swift Swim"
+  },
+  "130": {
+    "0": "Intimidate"
+  },
+  "131": {
+    "0": "Water Absorb",
+    "1": "Shell Armor"
+  },
+  "132": {
+    "0": "Limber"
+  },
+  "133": {
+    "0": "Run Away",
+    "1": "Adaptability"
+  },
+  "134": {
+    "0": "Water Absorb"
+  },
+  "135": {
+    "0": "Volt Absorb"
+  },
+  "136": {
+    "0": "Flash Fire"
+  },
+  "137": {
+    "0": "Trace",
+    "1": "Download"
+  },
+  "138": {
+    "0": "Swift Swim",
+    "1": "Shell Armor"
+  },
+  "139": {
+    "0": "Swift Swim",
+    "1": "Shell Armor"
+  },
+  "140": {
+    "0": "Swift Swim",
+    "1": "Battle Armor"
+  },
+  "141": {
+    "0": "Swift Swim",
+    "1": "Battle Armor"
+  },
+  "142": {
+    "0": "Rock Head",
+    "1": "Pressure"
+  },
+  "143": {
+    "0": "Immunity",
+    "1": "Thick Fat"
+  },
+  "144": {
+    "0": "Pressure"
+  },
+  "145": {
+    "0": "Pressure"
+  },
+  "146": {
+    "0": "Pressure"
+  },
+  "147": {
+    "0": "Shed Skin"
+  },
+  "148": {
+    "0": "Shed Skin"
+  },
+  "149": {
+    "0": "Inner Focus"
+  },
+  "150": {
+    "0": "Pressure"
+  },
+  "151": {
+    "0": "Synchronize"
+  },
+  "152": {
+    "0": "Overgrow"
+  },
+  "153": {
+    "0": "Overgrow"
+  },
+  "154": {
+    "0": "Overgrow"
+  },
+  "155": {
+    "0": "Blaze"
+  },
+  "156": {
+    "0": "Blaze"
+  },
+  "157": {
+    "0": "Blaze"
+  },
+  "158": {
+    "0": "Torrent"
+  },
+  "159": {
+    "0": "Torrent"
+  },
+  "160": {
+    "0": "Torrent"
+  },
+  "161": {
+    "0": "Run Away",
+    "1": "Keen Eye"
+  },
+  "162": {
+    "0": "Run Away",
+    "1": "Keen Eye"
+  },
+  "163": {
+    "0": "Insomnia",
+    "1": "Keen Eye"
+  },
+  "164": {
+    "0": "Insomnia",
+    "1": "Keen Eye"
+  },
+  "165": {
+    "0": "Swarm",
+    "1": "Early Bird"
+  },
+  "166": {
+    "0": "Swarm",
+    "1": "Early Bird"
+  },
+  "167": {
+    "0": "Swarm",
+    "1": "Insomnia"
+  },
+  "168": {
+    "0": "Swarm",
+    "1": "Insomnia"
+  },
+  "169": {
+    "0": "Inner Focus"
+  },
+  "170": {
+    "0": "Volt Absorb",
+    "1": "Illuminate"
+  },
+  "171": {
+    "0": "Volt Absorb",
+    "1": "Illuminate"
+  },
+  "172": {
+    "0": "Static"
+  },
+  "173": {
+    "0": "Cute Charm",
+    "1": "Magic Guard"
+  },
+  "174": {
+    "0": "Cute Charm"
+  },
+  "175": {
+    "0": "Hustle",
+    "1": "Serene Grace"
+  },
+  "176": {
+    "0": "Hustle",
+    "1": "Serene Grace"
+  },
+  "177": {
+    "0": "Synchronize",
+    "1": "Early Bird"
+  },
+  "178": {
+    "0": "Synchronize",
+    "1": "Early Bird"
+  },
+  "179": {
+    "0": "Static"
+  },
+  "180": {
+    "0": "Static"
+  },
+  "181": {
+    "0": "Static"
+  },
+  "182": {
+    "0": "Chlorophyll"
+  },
+  "183": {
+    "0": "Thick Fat",
+    "1": "Huge Power"
+  },
+  "184": {
+    "0": "Thick Fat",
+    "1": "Huge Power"
+  },
+  "185": {
+    "0": "Sturdy",
+    "1": "Rock Head"
+  },
+  "186": {
+    "0": "Water Absorb",
+    "1": "Damp"
+  },
+  "187": {
+    "0": "Chlorophyll",
+    "1": "Leaf Guard"
+  },
+  "188": {
+    "0": "Chlorophyll",
+    "1": "Leaf Guard"
+  },
+  "189": {
+    "0": "Chlorophyll",
+    "1": "Leaf Guard"
+  },
+  "190": {
+    "0": "Run Away",
+    "1": "Pickup"
+  },
+  "191": {
+    "0": "Chlorophyll",
+    "1": "Solar Power"
+  },
+  "192": {
+    "0": "Chlorophyll",
+    "1": "Solar Power"
+  },
+  "193": {
+    "0": "Speed Boost",
+    "1": "Compound Eyes"
+  },
+  "194": {
+    "0": "Damp",
+    "1": "Water Absorb"
+  },
+  "195": {
+    "0": "Damp",
+    "1": "Water Absorb"
+  },
+  "196": {
+    "0": "Synchronize"
+  },
+  "197": {
+    "0": "Synchronize"
+  },
+  "198": {
+    "0": "Insomnia",
+    "1": "Super Luck"
+  },
+  "199": {
+    "0": "Oblivious",
+    "1": "Own Tempo"
+  },
+  "200": {
+    "0": "Levitate"
+  },
+  "201": {
+    "0": "Levitate"
+  },
+  "202": {
+    "0": "Shadow Tag"
+  },
+  "203": {
+    "0": "Inner Focus",
+    "1": "Early Bird"
+  },
+  "204": {
+    "0": "Sturdy"
+  },
+  "205": {
+    "0": "Sturdy"
+  },
+  "206": {
+    "0": "Serene Grace",
+    "1": "Run Away"
+  },
+  "207": {
+    "0": "Hyper Cutter",
+    "1": "Sand Veil"
+  },
+  "208": {
+    "0": "Rock Head",
+    "1": "Sturdy"
+  },
+  "209": {
+    "0": "Intimidate",
+    "1": "Run Away"
+  },
+  "210": {
+    "0": "Intimidate",
+    "1": "Quick Feet"
+  },
+  "211": {
+    "0": "Poison Point",
+    "1": "Swift Swim"
+  },
+  "212": {
+    "0": "Swarm",
+    "1": "Technician"
+  },
+  "213": {
+    "0": "Sturdy",
+    "1": "Gluttony"
+  },
+  "214": {
+    "0": "Swarm",
+    "1": "Guts"
+  },
+  "215": {
+    "0": "Inner Focus",
+    "1": "Keen Eye"
+  },
+  "216": {
+    "0": "Pickup",
+    "1": "Quick Feet"
+  },
+  "217": {
+    "0": "Guts",
+    "1": "Quick Feet"
+  },
+  "218": {
+    "0": "Magma Armor",
+    "1": "Flame Body"
+  },
+  "219": {
+    "0": "Magma Armor",
+    "1": "Flame Body"
+  },
+  "220": {
+    "0": "Oblivious",
+    "1": "Snow Cloak"
+  },
+  "221": {
+    "0": "Oblivious",
+    "1": "Snow Cloak"
+  },
+  "222": {
+    "0": "Hustle",
+    "1": "Natural Cure"
+  },
+  "223": {
+    "0": "Hustle",
+    "1": "Sniper"
+  },
+  "224": {
+    "0": "Suction Cups",
+    "1": "Sniper"
+  },
+  "225": {
+    "0": "Vital Spirit",
+    "1": "Hustle"
+  },
+  "226": {
+    "0": "Swift Swim",
+    "1": "Water Absorb"
+  },
+  "227": {
+    "0": "Keen Eye",
+    "1": "Sturdy"
+  },
+  "228": {
+    "0": "Early Bird",
+    "1": "Flash Fire"
+  },
+  "229": {
+    "0": "Early Bird",
+    "1": "Flash Fire"
+  },
+  "230": {
+    "0": "Swift Swim",
+    "1": "Sniper"
+  },
+  "231": {
+    "0": "Pickup"
+  },
+  "232": {
+    "0": "Sturdy"
+  },
+  "233": {
+    "0": "Trace",
+    "1": "Download"
+  },
+  "234": {
+    "0": "Intimidate",
+    "1": "Frisk"
+  },
+  "235": {
+    "0": "Own Tempo",
+    "1": "Technician"
+  },
+  "236": {
+    "0": "Guts",
+    "1": "Steadfast"
+  },
+  "237": {
+    "0": "Intimidate",
+    "1": "Technician"
+  },
+  "238": {
+    "0": "Oblivious",
+    "1": "Forewarn"
+  },
+  "239": {
+    "0": "Static"
+  },
+  "240": {
+    "0": "Flame Body"
+  },
+  "241": {
+    "0": "Thick Fat",
+    "1": "Scrappy"
+  },
+  "242": {
+    "0": "Natural Cure",
+    "1": "Serene Grace"
+  },
+  "243": {
+    "0": "Pressure"
+  },
+  "244": {
+    "0": "Pressure"
+  },
+  "245": {
+    "0": "Pressure"
+  },
+  "246": {
+    "0": "Guts"
+  },
+  "247": {
+    "0": "Shed Skin"
+  },
+  "248": {
+    "0": "Sand Stream"
+  },
+  "249": {
+    "0": "Pressure"
+  },
+  "250": {
+    "0": "Pressure"
+  },
+  "251": {
+    "0": "Natural Cure"
+  },
+  "252": {
+    "0": "Overgrow"
+  },
+  "253": {
+    "0": "Overgrow"
+  },
+  "254": {
+    "0": "Overgrow"
+  },
+  "255": {
+    "0": "Blaze"
+  },
+  "256": {
+    "0": "Blaze"
+  },
+  "257": {
+    "0": "Blaze"
+  },
+  "258": {
+    "0": "Torrent"
+  },
+  "259": {
+    "0": "Torrent"
+  },
+  "260": {
+    "0": "Torrent"
+  },
+  "261": {
+    "0": "Run Away",
+    "1": "Quick Feet"
+  },
+  "262": {
+    "0": "Intimidate",
+    "1": "Quick Feet"
+  },
+  "263": {
+    "0": "Pickup",
+    "1": "Gluttony"
+  },
+  "264": {
+    "0": "Pickup",
+    "1": "Gluttony"
+  },
+  "265": {
+    "0": "Shield Dust"
+  },
+  "266": {
+    "0": "Shed Skin"
+  },
+  "267": {
+    "0": "Swarm"
+  },
+  "268": {
+    "0": "Shed Skin"
+  },
+  "269": {
+    "0": "Shield Dust"
+  },
+  "270": {
+    "0": "Swift Swim",
+    "1": "Rain Dish"
+  },
+  "271": {
+    "0": "Swift Swim",
+    "1": "Rain Dish"
+  },
+  "272": {
+    "0": "Swift Swim",
+    "1": "Rain Dish"
+  },
+  "273": {
+    "0": "Chlorophyll",
+    "1": "Early Bird"
+  },
+  "274": {
+    "0": "Chlorophyll",
+    "1": "Early Bird"
+  },
+  "275": {
+    "0": "Chlorophyll",
+    "1": "Early Bird"
+  },
+  "276": {
+    "0": "Guts"
+  },
+  "277": {
+    "0": "Guts"
+  },
+  "278": {
+    "0": "Keen Eye"
+  },
+  "279": {
+    "0": "Keen Eye"
+  },
+  "280": {
+    "0": "Synchronize",
+    "1": "Trace"
+  },
+  "281": {
+    "0": "Synchronize",
+    "1": "Trace"
+  },
+  "282": {
+    "0": "Synchronize",
+    "1": "Trace"
+  },
+  "283": {
+    "0": "Swift Swim"
+  },
+  "284": {
+    "0": "Intimidate"
+  },
+  "285": {
+    "0": "Effect Spore",
+    "1": "Poison Heal"
+  },
+  "286": {
+    "0": "Effect Spore",
+    "1": "Poison Heal"
+  },
+  "287": {
+    "0": "Truant"
+  },
+  "288": {
+    "0": "Vital Spirit"
+  },
+  "289": {
+    "0": "Truant"
+  },
+  "290": {
+    "0": "Compound Eyes"
+  },
+  "291": {
+    "0": "Speed Boost"
+  },
+  "292": {
+    "0": "Wonder Guard"
+  },
+  "293": {
+    "0": "Soundproof"
+  },
+  "294": {
+    "0": "Soundproof"
+  },
+  "295": {
+    "0": "Soundproof"
+  },
+  "296": {
+    "0": "Thick Fat",
+    "1": "Guts"
+  },
+  "297": {
+    "0": "Thick Fat",
+    "1": "Guts"
+  },
+  "298": {
+    "0": "Thick Fat",
+    "1": "Huge Power"
+  },
+  "299": {
+    "0": "Sturdy",
+    "1": "Magnet Pull"
+  },
+  "300": {
+    "0": "Cute Charm",
+    "1": "Normalize"
+  },
+  "301": {
+    "0": "Cute Charm",
+    "1": "Normalize"
+  },
+  "302": {
+    "0": "Keen Eye",
+    "1": "Stall"
+  },
+  "303": {
+    "0": "Hyper Cutter",
+    "1": "Intimidate"
+  },
+  "304": {
+    "0": "Sturdy",
+    "1": "Rock Head"
+  },
+  "305": {
+    "0": "Sturdy",
+    "1": "Rock Head"
+  },
+  "306": {
+    "0": "Sturdy",
+    "1": "Rock Head"
+  },
+  "307": {
+    "0": "Pure Power"
+  },
+  "308": {
+    "0": "Pure Power"
+  },
+  "309": {
+    "0": "Static",
+    "1": "Lightning Rod"
+  },
+  "310": {
+    "0": "Static",
+    "1": "Lightning Rod"
+  },
+  "311": {
+    "0": "Plus"
+  },
+  "312": {
+    "0": "Minus"
+  },
+  "313": {
+    "0": "Illuminate",
+    "1": "Swarm"
+  },
+  "314": {
+    "0": "Oblivious",
+    "1": "Tinted Lens"
+  },
+  "315": {
+    "0": "Natural Cure",
+    "1": "Poison Point"
+  },
+  "316": {
+    "0": "Liquid Ooze",
+    "1": "Sticky Hold"
+  },
+  "317": {
+    "0": "Liquid Ooze",
+    "1": "Sticky Hold"
+  },
+  "318": {
+    "0": "Rough Skin"
+  },
+  "319": {
+    "0": "Rough Skin"
+  },
+  "320": {
+    "0": "Water Veil",
+    "1": "Oblivious"
+  },
+  "321": {
+    "0": "Water Veil",
+    "1": "Oblivious"
+  },
+  "322": {
+    "0": "Oblivious",
+    "1": "Simple"
+  },
+  "323": {
+    "0": "Magma Armor",
+    "1": "Solid Rock"
+  },
+  "324": {
+    "0": "White Smoke"
+  },
+  "325": {
+    "0": "Thick Fat",
+    "1": "Own Tempo"
+  },
+  "326": {
+    "0": "Thick Fat",
+    "1": "Own Tempo"
+  },
+  "327": {
+    "0": "Own Tempo",
+    "1": "Tangled Feet"
+  },
+  "328": {
+    "0": "Hyper Cutter",
+    "1": "Arena Trap"
+  },
+  "329": {
+    "0": "Levitate"
+  },
+  "330": {
+    "0": "Levitate"
+  },
+  "331": {
+    "0": "Sand Veil"
+  },
+  "332": {
+    "0": "Sand Veil"
+  },
+  "333": {
+    "0": "Natural Cure"
+  },
+  "334": {
+    "0": "Natural Cure"
+  },
+  "335": {
+    "0": "Immunity"
+  },
+  "336": {
+    "0": "Shed Skin"
+  },
+  "337": {
+    "0": "Levitate"
+  },
+  "338": {
+    "0": "Levitate"
+  },
+  "339": {
+    "0": "Oblivious",
+    "1": "Anticipation"
+  },
+  "340": {
+    "0": "Oblivious",
+    "1": "Anticipation"
+  },
+  "341": {
+    "0": "Hyper Cutter",
+    "1": "Shell Armor"
+  },
+  "342": {
+    "0": "Hyper Cutter",
+    "1": "Shell Armor"
+  },
+  "343": {
+    "0": "Levitate"
+  },
+  "344": {
+    "0": "Levitate"
+  },
+  "345": {
+    "0": "Suction Cups"
+  },
+  "346": {
+    "0": "Suction Cups"
+  },
+  "347": {
+    "0": "Battle Armor"
+  },
+  "348": {
+    "0": "Battle Armor"
+  },
+  "349": {
+    "0": "Swift Swim"
+  },
+  "350": {
+    "0": "Marvel Scale"
+  },
+  "351": {
+    "0": "Forecast"
+  },
+  "352": {
+    "0": "Color Change"
+  },
+  "353": {
+    "0": "Insomnia",
+    "1": "Frisk"
+  },
+  "354": {
+    "0": "Insomnia",
+    "1": "Frisk"
+  },
+  "355": {
+    "0": "Levitate"
+  },
+  "356": {
+    "0": "Pressure"
+  },
+  "357": {
+    "0": "Chlorophyll",
+    "1": "Solar Power"
+  },
+  "358": {
+    "0": "Levitate"
+  },
+  "359": {
+    "0": "Pressure",
+    "1": "Super Luck"
+  },
+  "360": {
+    "0": "Shadow Tag"
+  },
+  "361": {
+    "0": "Inner Focus",
+    "1": "Ice Body"
+  },
+  "362": {
+    "0": "Inner Focus",
+    "1": "Ice Body"
+  },
+  "363": {
+    "0": "Thick Fat",
+    "1": "Ice Body"
+  },
+  "364": {
+    "0": "Thick Fat",
+    "1": "Ice Body"
+  },
+  "365": {
+    "0": "Thick Fat",
+    "1": "Ice Body"
+  },
+  "366": {
+    "0": "Shell Armor"
+  },
+  "367": {
+    "0": "Swift Swim"
+  },
+  "368": {
+    "0": "Swift Swim"
+  },
+  "369": {
+    "0": "Swift Swim",
+    "1": "Rock Head"
+  },
+  "370": {
+    "0": "Swift Swim"
+  },
+  "371": {
+    "0": "Rock Head"
+  },
+  "372": {
+    "0": "Rock Head"
+  },
+  "373": {
+    "0": "Intimidate"
+  },
+  "374": {
+    "0": "Clear Body"
+  },
+  "375": {
+    "0": "Clear Body"
+  },
+  "376": {
+    "0": "Clear Body"
+  },
+  "377": {
+    "0": "Clear Body"
+  },
+  "378": {
+    "0": "Clear Body"
+  },
+  "379": {
+    "0": "Clear Body"
+  },
+  "380": {
+    "0": "Levitate"
+  },
+  "381": {
+    "0": "Levitate"
+  },
+  "382": {
+    "0": "Drizzle"
+  },
+  "383": {
+    "0": "Drought"
+  },
+  "384": {
+    "0": "Air Lock"
+  },
+  "385": {
+    "0": "Serene Grace"
+  },
+  "386": {
+    "0": "Pressure"
+  }
+}

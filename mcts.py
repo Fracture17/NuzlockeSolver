@@ -18,41 +18,36 @@ class MCTSNode:
     A node in the Monte Carlo Search Tree.
 
     Attributes:
-        state: The game/problem state at this node
+        state: The game/problem state at this node (only populated for root)
         parent: Parent node (None for root)
         action: Action taken from parent to reach this node
         children: List of child nodes
         visits: Number of times this node has been visited
         value: Total value accumulated from simulations
-        untried_actions: Actions that haven't been explored yet
+        tried_actions: Set of actions that have been tried from this node
     """
 
-    def __init__(self, state: Any, parent: Optional['MCTSNode'] = None,
-                 action: Any = None, untried_actions: List[Any] = None):
+    def __init__(self, state: Any = None, parent: Optional['MCTSNode'] = None,
+                 action: Any = None):
         self.state = state
         self.parent = parent
         self.action = action
         self.children: List[MCTSNode] = []
         self.visits = 0
         self.value = 0.0
-        self.untried_actions = untried_actions if untried_actions is not None else []
+        self.tried_actions: set = set()
         self.lock = threading.Lock()
 
-    def is_fully_expanded(self) -> bool:
-        """Check if all possible actions from this node have been tried."""
-        return len(self.untried_actions) == 0
-
-    def is_terminal(self) -> bool:
-        """Check if this is a terminal node (no children possible)."""
-        return len(self.untried_actions) == 0 and len(self.children) == 0
-
     #Returns None when node has no children, likely due to parallel workers
-    def best_child(self, exploration_weight: float = 1.414) -> 'MCTSNode':
+    def best_child(self, exploration_weight: float = 1.414,
+                   action_penalty_fn=None) -> 'MCTSNode':
         """
         Select the best child using UCB1 formula.
 
         Args:
             exploration_weight: UCB1 exploration parameter (default sqrt(2))
+            action_penalty_fn: Optional callable(action) -> float added to UCB1 for
+                               comparison only. Does not affect stored values.
 
         Returns:
             Child node with highest UCB1 value
@@ -62,8 +57,13 @@ class MCTSNode:
         if len(self.children) == 0:
             return None
 
-        return max(self.children,
-                    key=lambda child: child.ucb1(exploration_weight))
+        def score(child):
+            ucb = child.ucb1(exploration_weight)
+            if action_penalty_fn is not None:
+                ucb += action_penalty_fn(child.action)
+            return ucb
+
+        return max(self.children, key=score)
 
     def ucb1(self, exploration_weight: float = 1.414) -> float:
         """
@@ -183,21 +183,21 @@ class MCTS(ABC):
         Returns:
             Tuple of (best_action, root_node)
         """
-        root = MCTSNode(
-            state=initial_state,
-            untried_actions=self.get_legal_actions(initial_state)
-        )
+        root = MCTSNode(state=initial_state)
 
         for _ in range(iterations):
-            # Selection: traverse tree to find node to expand
-            node = self._select(root)
+            # Selection: traverse tree, re-simulating each step for fresh RNG
+            node, state = self._select(root)
 
-            # Expansion: add a new child node
-            if not self.is_terminal(node.state) and node.untried_actions:
-                node = self._expand(node)
+            # Expansion: try a new untried action if available
+            if not self.is_terminal(state):
+                available = self.get_legal_actions(state)
+                untried = [a for a in available if a not in node.tried_actions]
+                if untried:
+                    node, state = self._expand(node, state, untried)
 
             # Simulation: playout from new node
-            reward = self._simulate(node.state, player)
+            reward = self._simulate(state, player)
 
             # Backpropagation: update node values
             self._backpropagate(node, reward)
@@ -209,44 +209,55 @@ class MCTS(ABC):
         best_child = max(root.children, key=lambda c: c.visits)
         return best_child.action, root
 
-    #Returns None when a node has no children, likely due to parallel workers
-    def _select(self, node: MCTSNode) -> MCTSNode:
+    def _select(self, root: MCTSNode) -> Tuple[MCTSNode, Any]:
         """
-        Selection phase: traverse tree using UCB1 until we find a node to expand.
+        Selection phase: traverse tree using UCB1, re-simulating each action
+        for a fresh RNG sample. Returns (node, state) at the expansion point.
 
         Args:
-            node: Starting node (typically root)
+            root: Starting node (root of tree)
 
         Returns:
-            Node to expand
+            Tuple of (node to expand, state at that node)
         """
-        while node is not None and not self.is_terminal(node.state):
-            if not node.is_fully_expanded():
-                return node
-            else:
-                node = node.best_child(self.exploration_weight)
-        return node
+        node = root
+        state = root.state
+        while True:
+            if self.is_terminal(state):
+                return node, state
+            available = self.get_legal_actions(state)
+            untried = [a for a in available if a not in node.tried_actions]
+            if untried:
+                return node, state
+            best = node.best_child(self.exploration_weight)
+            if best is None:
+                return node, state
+            # Re-simulate this action to advance state (fresh RNG each visit)
+            state = self.apply_action(state, best.action)
+            node = best
 
-    def _expand(self, node: MCTSNode) -> MCTSNode:
+    def _expand(self, node: MCTSNode, state: Any, untried: List[Any]) -> Tuple[MCTSNode, Any]:
         """
-        Expansion phase: add a new child node for an untried action.
+        Expansion phase: pick the first untried action, simulate it, add a child node.
 
         Args:
             node: Node to expand from
+            state: Current state at this node
+            untried: List of untried actions at this node
 
         Returns:
-            Newly created child node
+            Tuple of (newly created child node, new state after action)
         """
-        action = node.untried_actions.pop(0)
-        next_state = self.apply_action(node.state, action)
+        action = untried[0]
+        node.tried_actions.add(action)
+        new_state = self.apply_action(state, action)
         child_node = MCTSNode(
-            state=next_state,
+            state=None,
             parent=node,
             action=action,
-            untried_actions=self.get_legal_actions(next_state)
         )
         node.children.append(child_node)
-        return child_node
+        return child_node, new_state
 
     def _simulate(self, state: Any, player: int) -> float:
         """
