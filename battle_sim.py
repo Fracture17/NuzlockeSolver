@@ -24,6 +24,16 @@ from gen3_data import get_move_info
 from ai_switch import select_switch_in
 
 
+def _rand_battle(battle: dict) -> dict:
+    """Return a shallow copy of the PS battle JSON with a fresh random PRNG seed.
+
+    The PS 'prng' field is a top-level array of 4 × 16-bit integers encoding the
+    LCG state.  Overwriting it before each IPC send ensures simulations from the
+    same node explore different RNG outcomes (crits, accuracy rolls, secondary
+    effects) rather than deterministically replaying the same trajectory every visit.
+    """
+    return {**battle, 'prng': [random.randint(0, 65535) for _ in range(4)]}
+
 
 class TimingStats:
     """Thread-safe accumulator for IPC call timing across multiple workers."""
@@ -560,11 +570,12 @@ class PokemonMCTS(MCTS):
         """Selection phase with switch penalty applied to best_child exploration."""
         node = root
         state = root.state
+        depth = 0
         counter = getattr(self, '_init_counter', 0)
         while True:
             if self.is_terminal(state):
                 return node, state
-            available = self.get_legal_actions(state)
+            available = self.get_legal_actions(state, depth)
             untried = [a for a in available if a not in node.tried_actions]
             if untried:
                 return node, state
@@ -580,12 +591,24 @@ class PokemonMCTS(MCTS):
             state = self.apply_action(state, best.action)
             counter = _update_counter(counter, state_before, state)
             node = best
+            depth += 1
 
-    def get_legal_actions(self, state: dict) -> list:
-        actions = state["p1_moves"] + state["p1_switches"]
+    def get_legal_actions(self, state: dict, depth: int = 0) -> list:
+        if depth == 0:
+            actions = state["p1_moves"] + state["p1_switches"]
+        else:
+            actions = state["p1_moves"] or state["p1_switches"]
         if self.forbidden_actions:
             actions = [a for a in actions if a not in self.forbidden_actions]
         return actions
+
+    def _expand(self, node, state, untried):
+        """Expansion phase: filter voluntary switches at non-root nodes."""
+        if node.parent is not None:
+            moves_only = [a for a in untried if not a.startswith('switch')]
+            if moves_only:
+                untried = moves_only
+        return super()._expand(node, state, untried)
 
     def _pick_p2_move(self, state: dict) -> Optional[str]:
         """Select the best move for p2 using ai_flags, falling back to first move."""
@@ -606,8 +629,8 @@ class PokemonMCTS(MCTS):
         return None
 
     def apply_action(self, state: dict, action: str) -> dict:
-        data = {"battle": state["battle"], "p1": action}
-        p2 = self._pick_p2_move(state)
+        data = {"battle": _rand_battle(state["battle"]), "p1": action}
+        p2 = state.get('_p2_forced') or self._pick_p2_move(state)
         if p2 is not None:
             data["p2"] = p2
         _t0 = time.perf_counter()
@@ -619,7 +642,7 @@ class PokemonMCTS(MCTS):
         while (not new_state["is_over"]
                and not new_state["p1_moves"]
                and not new_state["p1_switches"]):
-            data = {"battle": new_state["battle"]}
+            data = {"battle": _rand_battle(new_state["battle"])}
             p2 = self._pick_p2_move(new_state)
             if p2 is not None:
                 data["p2"] = p2
@@ -673,7 +696,7 @@ class PokemonMCTS(MCTS):
 
         #Remaining health
         score += p1_hp_sum
-        score -= p2_hp_sum * 2
+        score -= p2_hp_sum * 5
 
         #fainted pokemon.  No benifit from KOing opponent
         #Losing a single pokemon is penalized more than the benifit of winning, but it will lose pokemon to avoid losing
@@ -739,7 +762,7 @@ class PokemonMCTS(MCTS):
         depth = 0
         while not self.is_terminal(current) and depth < self.simulation_depth_limit:
             if self.greedy_rollout:
-                p1_actions = current["p1_moves"] + current["p1_switches"]
+                p1_actions = current["p1_moves"] or current["p1_switches"]
                 if not p1_actions:
                     break
                 best_next = None
@@ -772,14 +795,16 @@ def assemble_opponent_string(opp_first: str, opp_dict: dict) -> str:
     return "]".join(opp_dict[p] for p in [opp_first] + others)
 
 
-def reorder_team(team: tuple, assignment: dict, opp_first: str) -> list:
-    """Reorder team so the Pokémon assigned to counter opp_first leads.
+def reorder_team(team, assignment: dict, opponents: list) -> list:
+    """Reorder team so position i counters opponents[i].
 
-    Falls back to the first team member if no assignment match is found.
+    Team members not in assignment (flex slots) follow in original order.
     """
-    lead = next((p for p, opp in assignment.items() if opp == opp_first), team[0])
-    rest = [p for p in team if p != lead]
-    return [lead] + rest
+    inv = {opp: p for p, opp in assignment.items()}
+    ordered = [inv[opp] for opp in opponents if opp in inv]
+    assigned_set = set(ordered)
+    ordered += [p for p in team if p not in assigned_set]
+    return ordered
 
 
 def _snapshot_party(side: dict) -> list:
@@ -1166,6 +1191,7 @@ def _mcts_tree_worker(node_script_path, root, sem, player,
             node = root
             state = root.state  # thread-local state carried through traversal
             counter = init_counter  # thread-local switch penalty counter
+            depth = 0
 
             while True:
                 node.lock.acquire()
@@ -1173,9 +1199,17 @@ def _mcts_tree_worker(node_script_path, root, sem, player,
 
                 if game_over:
                     node.lock.release()
-                    break
+                    # Backpropagate the terminal reward — don't waste this permit.
+                    reward = local.get_reward_OLD(state, player)
+                    n = node
+                    while n is not None:
+                        with n.lock:
+                            n.visits += 1
+                            n.value += reward
+                        n = n.parent
+                    break  # action remains None; expansion/simulation skipped below
 
-                available = local.get_legal_actions(state)
+                available = local.get_legal_actions(state, depth)
                 untried = [a for a in available if a not in node.tried_actions]
 
                 if untried:
@@ -1192,9 +1226,16 @@ def _mcts_tree_worker(node_script_path, root, sem, player,
                     ),
                 )
                 if next_node is None:
-                    # All expansions in-flight, no children yet; retry selection
+                    # All expansions in-flight; simulate from here to avoid indefinite spin
                     node.lock.release()
-                    continue
+                    reward = local._simulate(state, player)
+                    n = node
+                    while n is not None:
+                        with n.lock:
+                            n.visits += 1
+                            n.value += reward
+                        n = n.parent
+                    break  # action remains None; skips expansion below
 
                 node.lock.release()
                 # Re-simulate this action to advance state (fresh RNG each visit)
@@ -1202,6 +1243,7 @@ def _mcts_tree_worker(node_script_path, root, sem, player,
                 state = local.apply_action(state, next_node.action)
                 counter = _update_counter(counter, state_before, state)
                 node = next_node
+                depth += 1
 
             if action is None:
                 continue  # terminal node; nothing to expand
@@ -1260,7 +1302,7 @@ def simulate_team(ipc, team_result: tuple, n_games: int = 10,
     score, team, assignment = team_result
     opp_first = next(iter(opp_dict))
 
-    ordered_team = reorder_team(list(team), assignment, opp_first)
+    ordered_team = reorder_team(list(team), assignment, list(opp_dict.keys()))
     player_str = assemble_team_string(ordered_team, box)
     opp_str = assemble_opponent_string(opp_first, opp_dict)
 

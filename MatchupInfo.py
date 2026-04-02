@@ -80,7 +80,20 @@ def get_teams_at_level(multiplier: float = 1.0,
                 natural = 100
             y[-2] = str(max(1, int(natural * multiplier)))
             result.append('|'.join(y))
-        return {x.split('|')[0]: x for x in result}
+        name_counts = {}
+        for x in result:
+            name = x.split('|')[0]
+            name_counts[name] = name_counts.get(name, 0) + 1
+        seen = {}
+        out = {}
+        for x in result:
+            name = x.split('|')[0]
+            if name_counts[name] == 1:
+                out[name] = x
+            else:
+                seen[name] = seen.get(name, 0) + 1
+                out[f"{name}#{seen[name]}"] = x
+        return out
     #No opponent multiplier, since only box should be affected
     return apply_level(box_raw, multiplier), apply_level(opp_raw)
 

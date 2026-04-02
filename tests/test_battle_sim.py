@@ -269,28 +269,30 @@ class TestAssembleOpponentString:
 # ---------------------------------------------------------------------------
 
 class TestReorderTeam:
-    def test_matched_pokemon_leads(self):
+    def test_full_assignment_orders_by_opponent(self):
         team = ("Gligar", "Magneton", "Tyranitar", "Ariados", "Jirachi", "Nosepass")
         assignment = {
             "Gligar": "Bellossom", "Magneton": "Walrein",
             "Tyranitar": "Lapras", "Ariados": "Sceptile",
             "Jirachi": "Linoone", "Nosepass": "Noctowl",
         }
-        result = reorder_team(team, assignment, "Sceptile")
-        assert result[0] == "Ariados"
+        opponents = ["Sceptile", "Bellossom", "Walrein", "Lapras", "Linoone", "Noctowl"]
+        result = reorder_team(team, assignment, opponents)
+        assert result == ["Ariados", "Gligar", "Magneton", "Tyranitar", "Jirachi", "Nosepass"]
 
     def test_all_members_preserved(self):
         team = ("A", "B", "C")
         assignment = {"A": "X", "B": "Y", "C": "Z"}
-        result = reorder_team(team, assignment, "Y")
+        result = reorder_team(team, assignment, ["X", "Y", "Z"])
         assert set(result) == {"A", "B", "C"}
-        assert result[0] == "B"
+        assert result == ["A", "B", "C"]
 
-    def test_fallback_when_no_match(self):
-        team = ("A", "B")
-        assignment = {"A": "X", "B": "Y"}
-        result = reorder_team(team, assignment, "UNKNOWN")
-        assert result[0] == "A"   # falls back to first team member
+    def test_flex_members_appended_in_original_order(self):
+        # 2 opponents, 3 team members — "B" is a flex slot
+        team = ("A", "B", "C")
+        assignment = {"A": "X", "C": "Z"}
+        result = reorder_team(team, assignment, ["Z", "X"])
+        assert result == ["C", "A", "B"]  # C→Z first, A→X second, B flex last
 
 
 # ---------------------------------------------------------------------------

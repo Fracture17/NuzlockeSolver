@@ -176,7 +176,7 @@ def main():
         jobs = []
         for team_type, team_result in teams:
             score, team, assignment = team_result
-            ordered = reorder_team(list(team), assignment, opp_first)
+            ordered = reorder_team(list(team), assignment, opponents)
             player_str = assemble_team_string(ordered, box)
             opp_str = assemble_opponent_string(opp_first, opp)
 

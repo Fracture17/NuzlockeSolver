@@ -28,6 +28,7 @@ from mgba._pylib import ffi
 import mgba.core as mgba_core
 import mgba.image
 from mgba.vfs import open_path as vfs_open_path
+import emulator_core
 
 from emerald_reader import (
     ENEMY_PARTY_COUNT_ADDR,
@@ -35,6 +36,7 @@ from emerald_reader import (
     POKEMON_SIZE,
     SPECIES_JSON,
     MOVES_JSON,
+    LAST_MOVES_ADDR,
     _read_bytes,
     decrypt_pokemon,
     internal_species_name,
@@ -48,6 +50,9 @@ from emerald_reader import (
 
 import json
 
+import tkinter as tk
+import tkinter.filedialog
+
 import battle_mode
 
 # ─── Configuration ────────────────────────────────────────────────────────────
@@ -57,9 +62,25 @@ NODE_SCRIPT = "/home/Fracture/WebstormProjects/pokemon-showdown-master/Connectio
 SCALE     = 3                                # 240×160 → 720×480
 SCAN_INTERVAL = 3.0                          # seconds between RAM scans
 
+_HERE             = os.path.dirname(os.path.abspath(__file__))
+_SAVESTATE_DIR    = os.path.join(_HERE, 'savestates')
+_SAVESTATE_CONFIG = os.path.join(_HERE, 'savestate_config.json')
+_SAVESTATE_FILETYPES = [('Save states', '*.state'), ('All files', '*.*')]
+
 SCAN_ADDR = 0x02024744   # gEnemyParty
 MAX_VALID_SPECIES = 440   # species IDs above this after decryption are garbage
-LEVEL_CAP = 9            # Party Pokémon are capped to this level every frame
+LEVEL_CAP = 19            # Party Pokémon are capped to this level every frame
+
+# ─── Testing mode — bypass MCTS and use a fixed action sequence ───────────────
+TESTING_MODE    = False
+TEST_ACTIONS    = ['move 3']  # cycles if battle exceeds list length
+
+# ─── Badge boosts — set True for each badge earned that boosts stats ──────────
+BADGE_BOOST_ATK = True   # Stone Badge   → Attack
+BADGE_BOOST_DEF = False   # Knuckle Badge → Defense
+BADGE_BOOST_SPA = False   # Heat Badge    → Sp. Attack
+BADGE_BOOST_SPD = False   # Balance Badge → Sp. Defense
+BADGE_BOOST_SPE = False   # Dynamo Badge  → Speed
 
 # ─── Per-frame script constants ───────────────────────────────────────────────
 _SAVE1_PTR    = 0x03005D8C   # IWRAM pointer to save block 1
@@ -150,8 +171,19 @@ def _cap_party_levels(core) -> None:
 
         w0      = (int(core.memory.u32[g_off]) ^ key) & 0xFFFFFFFF
         species = w0 & 0xFFFF
-        if not (1 <= species <= 500):
+        if not (1 <= species <= MAX_VALID_SPECIES):
             continue
+
+        # Guard: verify existing checksum before modifying.  If the game wrote
+        # new EXP data but hasn't yet updated the checksum (multi-frame update),
+        # the checksum will be stale.  Skip this frame so we never write a
+        # checksum that the game will immediately overwrite with a stale one.
+        cs_total = 0
+        for j in range(12):
+            w = (int(core.memory.u32[base + 0x20 + j * 4]) ^ key) & 0xFFFFFFFF
+            cs_total += (w & 0xFFFF) + (w >> 16)
+        if (cs_total & 0xFFFF) != int(core.memory.u16[base + 0x1C]):
+            continue  # mid-update or already corrupt — do not touch
 
         if int(core.memory.u8[base + _LEVEL_OFFSET]) > LEVEL_CAP:
             core.memory.u8[base + _LEVEL_OFFSET] = LEVEL_CAP
@@ -266,42 +298,81 @@ def _joystick_bitmask(joystick: pygame.joystick.Joystick) -> int:
     return mask
 
 
+def _savestate_last_loaded() -> str | None:
+    """Return path of last loaded savestate, or None if not set."""
+    try:
+        with open(_SAVESTATE_CONFIG) as f:
+            return json.load(f).get('last_loaded')
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def _savestate_set_last_loaded(path: str) -> None:
+    with open(_SAVESTATE_CONFIG, 'w') as f:
+        json.dump({'last_loaded': path}, f)
+
+
+def _savestate_save(core, emu_lock) -> None:
+    os.makedirs(_SAVESTATE_DIR, exist_ok=True)
+    root = tk.Tk(); root.withdraw()
+    path = tk.filedialog.asksaveasfilename(
+        title='Save State',
+        initialdir=_SAVESTATE_DIR,
+        defaultextension='.state',
+        filetypes=_SAVESTATE_FILETYPES,
+        parent=root,
+    )
+    root.destroy()
+    if not path:
+        return
+    with emu_lock:
+        buf = core.save_raw_state()
+    if buf is None:
+        print('[game_loop] Save state failed (core returned None)')
+        return
+    with open(path, 'wb') as f:
+        f.write(bytes(ffi.buffer(buf)))
+    print(f'[game_loop] State saved: {path}')
+
+
+def _savestate_load(core, emu_lock, path: str) -> bool:
+    """Load savestate from path. Returns True on success."""
+    return emulator_core.load_savestate(core, path, emu_lock)
+
+
+def _savestate_load_browse(core, emu_lock) -> None:
+    """Open file browser to select a savestate, load it, and persist the path."""
+    os.makedirs(_SAVESTATE_DIR, exist_ok=True)
+    root = tk.Tk(); root.withdraw()
+    path = tk.filedialog.askopenfilename(
+        title='Load State',
+        initialdir=_SAVESTATE_DIR,
+        filetypes=_SAVESTATE_FILETYPES,
+        parent=root,
+    )
+    root.destroy()
+    if not path:
+        return
+    if _savestate_load(core, emu_lock, path):
+        _savestate_set_last_loaded(path)
+
+
 def main():
     # ── Load lookup tables ──────────────────────────────────────────────────
     with open(SPECIES_JSON) as f: species_db = json.load(f)
     with open(MOVES_JSON)   as f: moves_db   = json.load(f)
 
     # ── Load emulator core ──────────────────────────────────────────────────
-    core = mgba_core.load_path(ROM_PATH)
-    if core is None:
-        raise RuntimeError(f"Failed to load ROM: {ROM_PATH}")
-
-    save_vfile = vfs_open_path(SAVE_FILE, "r+")
-    if save_vfile is None:
-        raise RuntimeError(f"Failed to open save file: {SAVE_FILE}")
-    core.load_save(save_vfile)
-
-    # Video buffer must be set up before reset()
-    width, height = core.desired_video_dimensions()
-    image = mgba.image.Image(width, height)
-    core.set_video_buffer(image)
-
-    core.reset()
-
-    # mgba's C library logs to stdout (fd 1). Save fd 1, redirect it to /dev/null
-    # to silence all C printf output, then point sys.stdout at the saved fd so
-    # Python print() calls still work.
-    _saved_stdout_fd = os.dup(1)
-    _devnull = os.open(os.devnull, os.O_WRONLY)
-    os.dup2(_devnull, 1)
-    os.close(_devnull)
-    sys.stdout = os.fdopen(_saved_stdout_fd, 'w', buffering=1)
+    core, image, ffi, width, height = emulator_core.init_emulator(ROM_PATH, SAVE_FILE)
 
     # ── Emulation thread ────────────────────────────────────────────────────
-    emu_lock      = threading.Lock()
-    running       = [True]   # list so the thread closure can read the flag
-    fast_forward  = [False]  # hold TAB to run uncapped
-    injected_keys = collections.deque()  # (bitmask, frames_remaining) pairs
+    emu_lock         = threading.Lock()
+    running          = [True]   # list so the thread closure can read the flag
+    fast_forward     = [False]  # hold TAB to run uncapped
+    injected_keys      = collections.deque()  # (bitmask, frames_remaining) pairs
+    opp_last_move_id   = [0]  # last non-zero gLastMoves[1]; updated per-frame by emu_loop
+    speed_toggle       = [False]  # F4 toggles permanent fast-forward (TAB still works too)
+    _battle_loop_active = threading.Event()  # set while run_battle_loop thread is alive
 
     def emu_loop():
         frame_time = 1.0 / 60.0
@@ -311,30 +382,19 @@ def main():
                 core.run_frame()
                 _cap_party_levels(core)
                 _infinite_rare_candy(core)
+                # gLastMoves[1] is valid during turn resolution; 0 at move-selection screen.
+                # Store the last non-zero value so suggest_and_queue_move() can read it.
+                _opp_move = int(core.memory.u16[LAST_MOVES_ADDR + 2])
+                if _opp_move:
+                    opp_last_move_id[0] = _opp_move
+
             if not fast_forward[0]:
                 elapsed = time.perf_counter() - t
                 remaining = frame_time - elapsed
                 if remaining > 0:
                     time.sleep(remaining)
 
-    threading.Thread(target=emu_loop, daemon=True).start()
-
-    # ── Periodic RAM scan thread ─────────────────────────────────────────────
-    def scan_loop():
-        while running[0]:
-            time.sleep(SCAN_INTERVAL)
-            with emu_lock:
-                slots = _scan_party(core, SCAN_ADDR, species_db, moves_db)
-            lines = [f"\n{'='*62}  RAM PARTY SCAN"]
-            if slots:
-                lines.extend(f"  {s}" for s in slots)
-            else:
-                lines.append("  (no valid Pokémon found)")
-            print('\n'.join(lines), flush=True)
-
-    threading.Thread(target=scan_loop, daemon=True).start()
-
-    # ── pygame setup ────────────────────────────────────────────────────────
+    # ── pygame setup (before emu thread so SDL is fully init'd first) ──────
     pygame.init()
     screen = pygame.display.set_mode((width * SCALE, height * SCALE))
     pygame.display.set_caption("Pokémon Emerald")
@@ -348,6 +408,8 @@ def main():
     else:
         print("[game_loop] No controller detected — using keyboard only")
 
+    threading.Thread(target=emu_loop, daemon=True).start()
+
     # ── Battle detection state ───────────────────────────────────────────────
     last_enemy_count = 0
 
@@ -358,17 +420,43 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running[0] = False
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_F4:
+                speed_toggle[0] = not speed_toggle[0]
+                state = 'ON' if speed_toggle[0] else 'OFF'
+                print(f'[game_loop] F4 — speed-up toggle {state}')
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_s and (event.mod & pygame.KMOD_CTRL):
+                _savestate_save(core, emu_lock)
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_l and (event.mod & pygame.KMOD_CTRL):
+                _savestate_load_browse(core, emu_lock)
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_F3:
-                print("[game_loop] F3 — dumping EWRAM to ram_ewram.bin ...")
-                with emu_lock:
-                    dump_ram(core)
+                last = _savestate_last_loaded()
+                if last:
+                    _savestate_load(core, emu_lock, last)
+                else:
+                    print('[game_loop] F3 — no savestate loaded yet')
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_F5:
-                print("[game_loop] F5 — starting battle mode MCTS...")
-                threading.Thread(
-                    target=battle_mode.suggest_and_queue_move,
-                    args=(core, emu_lock, NODE_SCRIPT, injected_keys),
-                    daemon=True,
-                ).start()
+                if _battle_loop_active.is_set():
+                    print('[game_loop] F5 — battle loop already running, ignoring.')
+                else:
+                    print('[game_loop] F5 — starting autonomous battle loop...')
+                    _battle_loop_active.set()
+                    def _battle_loop_wrapper():
+                        try:
+                            battle_mode.run_battle_loop(
+                                core, emu_lock, NODE_SCRIPT, injected_keys,
+                                opp_last_move_id,
+                                badge_boosts={
+                                    'atkBoost': BADGE_BOOST_ATK,
+                                    'defBoost': BADGE_BOOST_DEF,
+                                    'spaBoost': BADGE_BOOST_SPA,
+                                    'spdBoost': BADGE_BOOST_SPD,
+                                    'speBoost': BADGE_BOOST_SPE,
+                                },
+                                test_actions=TEST_ACTIONS if TESTING_MODE else None,
+                            )
+                        finally:
+                            _battle_loop_active.clear()
+                    threading.Thread(target=_battle_loop_wrapper, daemon=True).start()
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_F2:
                 print("[game_loop] F2 pressed — reading opponent team...")
                 with emu_lock:
@@ -392,7 +480,7 @@ def main():
         if joystick is not None:
             gba_keys |= _joystick_bitmask(joystick)
 
-        fast_forward[0] = bool(keys_held[pygame.K_TAB])
+        fast_forward[0] = bool(keys_held[pygame.K_TAB]) or speed_toggle[0]
 
         # Inject queued keys if available, otherwise use physical input
         if injected_keys:

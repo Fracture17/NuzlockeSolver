@@ -83,6 +83,7 @@ def _parse_block(lines: list) -> str:
     Returns the packed pipe string, or None if no name was found.
     """
     name = ability = nature = level_str = None
+    item = ''
     evs  = [0]  * 6   # default 0 per stat
     ivs  = [31] * 6   # default 31 per stat
     moves = []
@@ -102,7 +103,11 @@ def _parse_block(lines: list) -> str:
         elif line.startswith('-'):
             moves.append(_to_ps_id(line[1:].strip()))
         elif name is None:
-            name = line
+            if ' @ ' in line:
+                name, raw_item = line.split(' @ ', 1)
+                item = re.sub(r"[-\s'.]", '', raw_item).lower()
+            else:
+                name = line
         else:
             nature = line   # first plain word after name is the nature
 
@@ -117,8 +122,8 @@ def _parse_block(lines: list) -> str:
     level_str = level_str or '100'
 
     # PS packed format: nickname|species|item|ability|moves|nature|evs|gender|ivs|shiny|level|
-    # species left empty — PS infers from nickname; item/gender/shiny omitted
-    return f"{name}|||{ability}|{moves_str}|{nature}|{ev_str}||{iv_str}||{level_str}|"
+    # species left empty — PS infers from nickname; gender/shiny omitted
+    return f"{name}||{item}|{ability}|{moves_str}|{nature}|{ev_str}||{iv_str}||{level_str}|"
 
 
 # ─── File parsers ─────────────────────────────────────────────────────────────
@@ -179,7 +184,7 @@ def build_matchup_info(node_script_path: str, level_multiplier: float = 1.0,
     box_raw = parse_player_file()
     opp_raw = parse_opponent_file()
 
-    box_raw = box_raw[2:]
+    box_raw = box_raw
 
     return MatchupInfo(
         node_script_path,
@@ -225,14 +230,14 @@ def find_best_surviving_team(node_script_path: str, matchup_info,
         tried = set()
         rank = 0
         for score, team, assignment in all_teams:
-            ordered = reorder_team(list(team), assignment, opp_first)
+            ordered = reorder_team(list(team), assignment, opponents)
             dedup_key = (ordered[0], frozenset(ordered[1:]))
             if dedup_key in tried:
                 continue
             tried.add(dedup_key)
             rank += 1
 
-            print(f"\n=== Team #{rank}  score={score:.4f} ===")
+            print(f"\n=== Team #{rank}  score={score[0]:.4f},{score[1]:.4f} ===")
             print(f"  Members (lead first): {', '.join(ordered)}")
             print("  Matchup data:")
             for p in ordered:

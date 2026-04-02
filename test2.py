@@ -77,27 +77,33 @@ def select_best_team(m, n):
             for p in team
         }
 
-        best_score = -1.0
-        best_covered_pos = None
+        # Phase 1: find the assignment of n_opp members to opponents that
+        # maximises matchup score alone (flex contribution is ignored here).
+        best_matchup_score = -1.0
+        best_covered = None
         best_perm = None
 
-        for covered_pos in itertools.combinations(range(6), n_opp):
-            flex_pos = [i for i in range(6) if i not in set(covered_pos)]
-            flex_contribution = sum(avg_score[team[i]] for i in flex_pos)
-            covered_members = [team[i] for i in covered_pos]
-
+        for covered in itertools.combinations(range(6), n_opp):
+            covered_members = [team[i] for i in covered]
             for perm in itertools.permutations(range(n_opp)):
-                score = flex_contribution + sum(
+                matchup_score = sum(
                     normalized[covered_members[j]][opponents[perm[j]]]
                     for j in range(n_opp)
                 )
-                if score > best_score:
-                    best_score = score
-                    best_covered_pos = covered_pos
+                if matchup_score > best_matchup_score:
+                    best_matchup_score = matchup_score
+                    best_covered = covered
                     best_perm = perm
 
+        # Phase 2: remaining members fill flex slots, scored by average.
+        flex_score = sum(
+            avg_score[team[i]]
+            for i in range(6) if i not in set(best_covered)
+        )
+        best_score = (best_matchup_score, flex_score)
+
         assignment = {
-            team[best_covered_pos[j]]: opponents[best_perm[j]]
+            team[best_covered[j]]: opponents[best_perm[j]]
             for j in range(n_opp)
         }
         results.append((best_score, team, assignment))

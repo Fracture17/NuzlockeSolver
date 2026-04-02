@@ -44,7 +44,7 @@ ABILITIES_JSON = os.path.join(_HERE, "gen3_abilities.json")
 # gEnemyParty: 6 consecutive 100-byte encrypted Pokémon structs
 ENEMY_PARTY_ADDR       = 0x02024744
 # gEnemyPartyCount: u8
-ENEMY_PARTY_COUNT_ADDR = 0x02024A2C
+ENEMY_PARTY_COUNT_ADDR = 0x020244EA
 
 POKEMON_SIZE = 100  # bytes per party struct
 MAX_VALID_SPECIES = 440  # species IDs above this after decryption are garbage
@@ -73,6 +73,61 @@ BOX_DIAG_FILE   = os.path.join(_HERE, "BoxAddrDiag.txt")
 EWRAM_BASE    = 0x02000000
 EWRAM_SIZE    = 0x40000      # 256 KB
 RAM_DUMP_FILE = os.path.join(_HERE, "ram_ewram.bin")
+
+# ─── Battle-active structs (addresses from pokeemerald.sym) ──────────────────
+# gBattleMons: BattlePokemon[4], 0x58 bytes each.  [0]=player, [1]=opponent
+BATTLE_MONS_ADDR     = 0x02024084  # from pokeemerald.sym (size 0x160)
+BATTLE_MON_SIZE      = 0x58        # sizeof(BattlePokemon)
+BATTLE_MON_MOVES_OFF   = 0x00      # u16[4] moves at offset 0 within struct
+BATTLE_MON_STATUS2_OFF = 0x24      # u32 volatile-status flags (status2) within struct
+
+# status2 bit masks (see pokeemerald include/constants/battle.h)
+STATUS2_CONFUSION = 0x0000001C     # bits 2-4: 3-bit confusion turn counter (nonzero = confused)
+STATUS2_CURSED    = 0x00002000     # bit 13: Pokémon is under Curse
+
+# gLastMoves: u16[4], last move ID used by each battler. [0]=player, [1]=opponent.
+# Valid only during turn resolution; reset at the start of each new turn.
+LAST_MOVES_ADDR      = 0x02024248  # from pokeemerald.sym (size 0x08)
+
+# gLastUsedItem: u16; set when any battler uses a battle item.  Does NOT reset to 0 between
+# turns — must be manually zeroed after reading to support detection of repeated item use.
+LAST_USED_ITEM_ADDR  = 0x02024208  # from pokeemerald.sym (size 0x02)
+
+# Item IDs that trainers can use from their bag during battle (Gen 3 Emerald, items.h).
+# Held items (berries, etc.) also trigger gLastUsedItem — filter to only these.
+TRAINER_BATTLE_ITEM_IDS = frozenset({
+    13,  # Potion
+    22,  # Super Potion
+    21,  # Hyper Potion
+    20,  # Max Potion
+    19,  # Full Restore
+    23,  # Full Heal
+})
+
+# Maps GBA item ID → PS action string for use in IPC messages.
+# gen3_items.json omits these IDs, so this dict is the authoritative source.
+TRAINER_BATTLE_ITEM_PS_IDS = {
+    13: 'potion',
+    19: 'fullrestore',
+    20: 'maxpotion',
+    21: 'hyperpotion',
+    22: 'superpotion',
+    23: 'fullheal',
+}
+
+# gBattlerFainted: u8; observed value is 1 during all normal battle flow after the first turn,
+# and drops to 0 specifically when the forced-switch party screen is showing.
+# Value is also 0 before the first action menu (ps_state guard prevents false triggers then).
+BATTLER_FAINTED_ADDR = 0x0202420d  # from pokeemerald.sym (size 0x01)
+
+# gBattlerPartyIndexes: u16[4], active party slot per battler. [0]=player, [1]=opponent
+BATTLER_PARTY_INDEXES_ADDR = 0x0202406e  # from pokeemerald.sym (size 0x08)
+
+# gBattleCommunication: u8[8]; [0]==2 when player is at the main battle action menu
+BATTLE_COMM_ADDR = 0x02024332  # from pokeemerald.sym (size 0x08)
+
+# gBattleOutcome: u8; non-zero when battle has ended (1=won, 2=lost, 3=ran, 4=caught, 5=draw)
+BATTLE_OUTCOME_ADDR = 0x0202433a  # from pokeemerald.sym (size 0x01)
 
 # ─── Internal species ID → name (GBA internal ordering, NOT national dex) ────
 # Gen 1+2 (IDs 1–251): internal ID == national dex, looked up via species_db at runtime.
@@ -287,6 +342,50 @@ def _read_bytes(core, addr: int, n: int) -> bytes:
 
 
 # ─── Pokémon struct decryption ────────────────────────────────────────────────
+
+def _check_pokemon_checksum(raw: bytes) -> bool:
+    """Return True if the 100-byte Pokémon struct has a valid Gen 3 checksum.
+
+    The checksum is a u16 at offset 0x1C covering the 48 encrypted bytes
+    (offsets 0x20–0x4F).  An all-zero (empty) slot correctly returns True.
+    A slot that is mid-write — substructures re-encrypted but checksum not
+    yet updated — returns False, indicating the caller should retry.
+    """
+    pid        = struct.unpack_from('<I', raw, 0)[0]
+    otid       = struct.unpack_from('<I', raw, 4)[0]
+    key        = pid ^ otid
+    stored_cs  = struct.unpack_from('<H', raw, 0x1C)[0]
+    total = 0
+    for i in range(12):
+        w = struct.unpack_from('<I', raw, 0x20 + i * 4)[0] ^ key
+        total += (w & 0xFFFF) + (w >> 16)
+    return (total & 0xFFFF) == stored_cs
+
+
+def _read_party(core, base_addr: int) -> tuple[list, bool]:
+    """Read a 6-slot party from GBA memory with checksum validation.
+
+    Returns (team, all_valid) where all_valid is False if any slot was skipped
+    due to a bad checksum (mid-write race condition) or decrypt failure.
+    Empty slots (species == 0) do not affect all_valid.
+    """
+    team = []
+    all_valid = True
+    for i in range(6):
+        raw = _read_bytes(core, base_addr + i * POKEMON_SIZE, POKEMON_SIZE)
+        if not _check_pokemon_checksum(raw):
+            all_valid = False
+            continue
+        try:
+            p = decrypt_pokemon(raw)
+        except Exception:
+            all_valid = False
+            continue
+        if p['species'] == 0 or p['species'] > MAX_VALID_SPECIES:
+            continue
+        team.append(p)
+    return team, all_valid
+
 
 def _get_substructure(data: bytes, order: tuple, idx: int) -> bytes:
     """Return the 12-byte substructure at logical index idx."""
@@ -551,42 +650,37 @@ def decrypt_box_pokemon(raw: bytes) -> dict | None:
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 def read_enemy_team(core) -> list:
-    """
-    Read and decrypt all Pokémon in the enemy party from GBA memory.
-
-    Scans all 6 slots and filters by valid species rather than using the count byte,
-    because gEnemyPartyCount may return 0 mid-battle even when Pokémon are present.
-    """
-    team = []
-    for i in range(6):
-        raw = _read_bytes(core, ENEMY_PARTY_ADDR + i * POKEMON_SIZE, POKEMON_SIZE)
-        try:
-            p = decrypt_pokemon(raw)
-        except Exception:
-            continue
-        if p['species'] == 0 or p['species'] > MAX_VALID_SPECIES:
-            continue
-        team.append(p)
+    """Read enemy party (best-effort, no checksum guarantee).  Use
+    read_enemy_team_validated when the caller can retry on partial reads."""
+    team, _ = _read_party(core, ENEMY_PARTY_ADDR)
     return team
+
+
+def read_enemy_team_validated(core) -> tuple[list, bool]:
+    """Read enemy party with checksum validation.
+
+    Returns (team, all_valid).  all_valid is False if any slot was skipped due
+    to a bad checksum (mid-write race); caller should release emu_lock, sleep
+    one frame, and retry.
+    """
+    return _read_party(core, ENEMY_PARTY_ADDR)
 
 
 def read_player_team(core) -> list:
-    """
-    Read and decrypt all Pokémon in the player's active party from GBA memory.
-
-    Scans all 6 slots and filters by valid species (same approach as read_enemy_team).
-    """
-    team = []
-    for i in range(6):
-        raw = _read_bytes(core, PLAYER_PARTY_ADDR + i * POKEMON_SIZE, POKEMON_SIZE)
-        try:
-            p = decrypt_pokemon(raw)
-        except Exception:
-            continue
-        if p['species'] == 0 or p['species'] > MAX_VALID_SPECIES:
-            continue
-        team.append(p)
+    """Read player party (best-effort, no checksum guarantee).  Use
+    read_player_team_validated when the caller can retry on partial reads."""
+    team, _ = _read_party(core, PLAYER_PARTY_ADDR)
     return team
+
+
+def read_player_team_validated(core) -> tuple[list, bool]:
+    """Read player party with checksum validation.
+
+    Returns (team, all_valid).  all_valid is False if any slot was skipped due
+    to a bad checksum (mid-write race); caller should release emu_lock, sleep
+    one frame, and retry.
+    """
+    return _read_party(core, PLAYER_PARTY_ADDR)
 
 
 def read_player_box(core) -> list:
@@ -769,6 +863,146 @@ def log_team(team: list, log_file: str = LOG_FILE) -> None:
         f.write(output)
 
     print(f"[emerald_reader] Wrote {len(team)} Pokémon to {log_file}")
+
+
+# ─── Battle-active struct readers ────────────────────────────────────────────
+
+def read_battle_mon_moves(core, battler_idx: int) -> list[int]:
+    """Read gBattleMons[battler_idx].moves[0..3] — four u16 move IDs.
+
+    gBattleMons holds in-battle copies of each Pokémon's stats/moves, separate
+    from the party structs. moves[4] sits at offset 0x00 of BattlePokemon.
+
+    Args:
+        core: mgba core object (call within emu_lock).
+        battler_idx: 0=player, 1=opponent (2/3 for doubles).
+
+    Returns:
+        List of 4 move IDs as ints (0 = empty slot).
+    """
+    base = BATTLE_MONS_ADDR + battler_idx * BATTLE_MON_SIZE + BATTLE_MON_MOVES_OFF
+    return [int(core.memory.u16[base + i * 2]) for i in range(4)]
+
+
+def read_last_used_item(core) -> int:
+    """Read gLastUsedItem — the ID of the last battle item used by any battler.
+
+    Unlike gLastMoves, this does NOT reset between turns.  After reading, write
+    0 back (core.memory.u16[LAST_USED_ITEM_ADDR] = 0) so repeated use of the
+    same item is detectable next turn.  Call within emu_lock.
+    """
+    return int(core.memory.u16[LAST_USED_ITEM_ADDR])
+
+
+def read_battle_mon_status2(core, battler_idx: int) -> int:
+    """Read gBattleMons[battler_idx].status2 — volatile status flags.
+
+    Relevant masks: STATUS2_CONFUSION (0x1C), STATUS2_CURSED (0x2000).
+    Call within emu_lock.  battler_idx: 0=player, 1=opponent.
+    """
+    base = BATTLE_MONS_ADDR + battler_idx * BATTLE_MON_SIZE + BATTLE_MON_STATUS2_OFF
+    return int(core.memory.u32[base])
+
+
+def read_last_moves_raw(core) -> tuple[int, int]:
+    """Read gLastMoves[0] (player) and gLastMoves[1] (opponent) as u16.
+
+    Valid only during turn resolution — returns 0 if called at the move-selection
+    screen (gLastMoves is reset at the start of each new turn).
+
+    Args:
+        core: mgba core object (call within emu_lock, or from emu_loop).
+
+    Returns:
+        (player_last_move_id, opp_last_move_id) — may be 0 outside the valid window.
+    """
+    player = int(core.memory.u16[LAST_MOVES_ADDR])
+    opp    = int(core.memory.u16[LAST_MOVES_ADDR + 2])
+    return player, opp
+
+
+def last_move_id_to_slot(move_id: int, mon_moves: list[int]) -> int | None:
+    """Return the 1-based move slot matching move_id in mon_moves, or None.
+
+    Args:
+        move_id: move ID (u16) to search for.
+        mon_moves: list of 4 move IDs from read_battle_mon_moves().
+    """
+    for i, mid in enumerate(mon_moves):
+        if mid == move_id:
+            return i + 1
+    return None
+
+
+def read_player_party_idx(core) -> int:
+    """Read gBattlerPartyIndexes[0] — the player's current active party slot (0-based).
+
+    gBattlerPartyIndexes is a u16[4] array (8 bytes total); battler 0 (player) is the
+    u16 at byte offset +0.  Unlike _active_index(), this reflects the GBA's own record
+    of which party slot is currently in battle, so it stays correct after voluntary
+    switches (which do not reorder gPlayerParty).
+    Call within emu_lock.
+    """
+    return int(core.memory.u16[BATTLER_PARTY_INDEXES_ADDR])
+
+
+def read_opp_party_idx(core) -> int:
+    """Read gBattlerPartyIndexes[1] — the opponent's current active party slot (0-based).
+
+    gBattlerPartyIndexes is a u16[4] array (8 bytes total); battler 1 (opponent) is the
+    u16 at byte offset +2.  Read at the battle menu after a forced switch completes, so
+    it already reflects the newly sent-out Pokémon's party slot.
+    Call within emu_lock.
+    """
+    return int(core.memory.u16[BATTLER_PARTY_INDEXES_ADDR + 2])
+
+
+def read_battle_outcome(core) -> int:
+    """Read gBattleOutcome. Non-zero when the battle has ended.
+
+    Values: 0=in progress, 1=won, 2=lost, 3=ran, 4=caught, 5=draw.
+    Call within emu_lock.
+    """
+    return int(core.memory.u8[BATTLE_OUTCOME_ADDR])
+
+
+def read_battle_communication(core) -> int:
+    """Read gBattleCommunication[0].
+
+    Returns 2 when the player is at the main battle action menu (FIGHT/POKEMON/BAG/RUN).
+    Other values indicate turn resolution, text, or other in-battle states.
+    Call within emu_lock.
+    """
+    return int(core.memory.u8[BATTLE_COMM_ADDR])
+
+
+def read_battler_fainted(core) -> int:
+    """Return gBattlerFainted bitmask (bit 0 = player's battler fainted, bit 1 = opponent).
+
+    Non-zero while the faint screen is showing and a forced switch is pending.
+    Call within emu_lock.
+    """
+    return int(core.memory.u8[BATTLER_FAINTED_ADDR])
+
+
+def debug_print_battle_addrs(core, moves_db: dict) -> None:
+    """Print raw gLastMoves and gBattleMons[1].moves values for address verification.
+
+    Call within emu_lock. Cross-check the printed hex values against known move IDs
+    and the opponent's moveset to confirm gLastMoves and gBattleMons addresses are correct.
+    """
+    print(f"[DEBUG gLastMoves @ 0x{LAST_MOVES_ADDR:08X}]")
+    for i in range(4):
+        val   = int(core.memory.u16[LAST_MOVES_ADDR + i * 2])
+        label = {0: "player  ", 1: "opponent"}.get(i, "        ")
+        print(f"  [{i}] {label} = {val:#06x}  ({val})")
+
+    opp_base = BATTLE_MONS_ADDR + BATTLE_MON_SIZE + BATTLE_MON_MOVES_OFF
+    print(f"[DEBUG gBattleMons[1].moves @ 0x{opp_base:08X}]")
+    for i in range(4):
+        val  = int(core.memory.u16[opp_base + i * 2])
+        name = moves_db.get(str(val), f"id#{val:#06x}") if val else "(empty)"
+        print(f"  [{i}] = {val:#06x}  → {name}")
 
 
 # ─── Standalone entry point ───────────────────────────────────────────────────
