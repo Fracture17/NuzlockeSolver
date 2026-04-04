@@ -623,6 +623,47 @@ def get_opponent_move_weights(state: dict, n_samples: int = 100) -> dict:
     )
 
 
+def get_p2_move_candidates(
+    state: dict,
+    move_actions: list,
+    log: bool = False,
+    n_samples: int = 100,
+) -> list:
+    """Return a sorted list of (action, probability) pairs for the opponent's moves.
+
+    Samples ai_flags scoring n_samples times to account for randomness in
+    flags 3 and 4, then returns observed selection frequencies as normalized
+    probabilities.  Sorted descending by probability.
+
+    Args:
+        state: Current battle state dict (from parse_ipc_response).
+        move_actions: List of "move N" action strings to score.
+        log: If True, print the candidate list.
+        n_samples: Number of scoring samples to draw.
+
+    Returns:
+        List of (action, probability) tuples sorted by probability descending.
+    """
+    counts: dict = {}
+    for _ in range(n_samples):
+        action = select_move_with_ai_flags(state, move_actions, player=2)
+        if action is not None:
+            counts[action] = counts.get(action, 0) + 1
+
+    total = sum(counts.values()) or 1
+    candidates = sorted(
+        [(a, c / total) for a, c in counts.items()],
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+    if log:
+        print(f'[get_p2_move_candidates] ' +
+              ', '.join(f'{a}({w:.2f})' for a, w in candidates))
+
+    return candidates
+
+
 class PokemonMCTS(MCTS):
     """Concrete MCTS for Pokémon battles.
 
