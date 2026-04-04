@@ -498,6 +498,131 @@ def select_move_with_ai_flags(
     return best_action
 
 
+def _pick_opponent_action(state: dict) -> Optional[str]:
+    """Select the best action for the opponent (p2) using ai_flags or switch logic.
+
+    Uses ai_flags scoring for moves, select_switch_in for switches.
+    Returns None if neither moves nor switches are available.
+    """
+    if state["p2_moves"]:
+        scored = select_move_with_ai_flags(state, state["p2_moves"], player=2)
+        return scored if scored is not None else state["p2_moves"][0]
+    if state["p2_switches"]:
+        return select_switch_in(state, state["p2_switches"], player=2)
+    return None
+
+
+def can_player_switch(state: dict) -> bool:
+    """Return True if the player is allowed to voluntarily switch this turn.
+
+    Switching is permitted when either:
+    - The opponent's active Pokémon just switched in (activeTurns == 1), or
+    - The opponent can one-shot the player's active Pokémon (any p2_dmg_calcs
+      value >= the player's current active HP).
+    """
+    battle = state.get("battle", {})
+    sides = battle.get("sides", [])
+    if len(sides) < 2:
+        return False
+
+    # Condition 1: opponent just switched in
+    opp_active = _get_active_pokemon(sides[1])
+    if opp_active is not None and opp_active.get("activeTurns", 2) == 1:
+        return True
+
+    # Condition 2: player is in KO range
+    p1_active = _get_active_pokemon(sides[0])
+    if p1_active is not None:
+        p1_hp = p1_active.get("hp", 0)
+        dmg_calcs = state.get("p2_dmg_calcs", {})
+        if dmg_calcs and max(dmg_calcs.values(), default=0) >= p1_hp:
+            return True
+
+    return False
+
+
+def simulate_turn(ipc, state: dict, p1_action: str, p2_action: Optional[str]) -> dict:
+    """Simulate one battle turn via IPC and return the resulting state.
+
+    Randomizes the PRNG on every call to ensure diverse RNG outcomes.
+    Automatically advances through any forced opponent switches after a faint.
+
+    Args:
+        ipc: NodeIPC instance.
+        state: Current battle state dict (from parse_ipc_response).
+        p1_action: Player's action string ("move N" or "switch N").
+        p2_action: Opponent's action string, or None if the opponent has no action.
+
+    Returns:
+        New battle state dict from parse_ipc_response.
+    """
+    data = {"battle": _rand_battle(state["battle"]), "p1": p1_action}
+    if p2_action is not None:
+        data["p2"] = p2_action
+    new_state = parse_ipc_response(ipc.send(data))
+
+    # Auto-advance forced opponent switches (e.g. after a faint)
+    while (not new_state["is_over"]
+           and not new_state["p1_moves"]
+           and not new_state["p1_switches"]):
+        p2 = _pick_opponent_action(new_state)
+        if p2 is None:
+            break
+        data = {"battle": _rand_battle(new_state["battle"]), "p2": p2}
+        new_state = parse_ipc_response(ipc.send(data))
+
+    return new_state
+
+
+def get_opponent_move_weights(state: dict, n_samples: int = 100) -> dict:
+    """Estimate the probability distribution over the opponent's legal actions.
+
+    Samples ai_flags scoring n_samples times (to account for randomness in
+    flags 3 and 4) and returns observed selection frequencies as a normalized
+    probability dict.
+
+    For switch actions, select_switch_in is deterministic so the chosen switch
+    gets probability 1.0.
+
+    Args:
+        state: Current battle state dict (from parse_ipc_response).
+        n_samples: Number of scoring samples to draw.
+
+    Returns:
+        Dict mapping action string to probability in [0, 1] (sums to 1.0).
+
+    Raises:
+        RuntimeError: If no legal opponent actions exist or scoring produces
+            no results (should never occur in a valid battle state).
+    """
+    if state["p2_moves"]:
+        counts: dict = {}
+        for _ in range(n_samples):
+            action = select_move_with_ai_flags(state, state["p2_moves"], player=2)
+            if action is not None:
+                counts[action] = counts.get(action, 0) + 1
+        if not counts:
+            raise RuntimeError(
+                "get_opponent_move_weights: ai_flags scoring returned no results "
+                f"for moves {state['p2_moves']}"
+            )
+        total = sum(counts.values())
+        return {k: v / total for k, v in counts.items()}
+
+    if state["p2_switches"]:
+        switch_action = select_switch_in(state, state["p2_switches"], player=2)
+        if switch_action is None:
+            raise RuntimeError(
+                "get_opponent_move_weights: select_switch_in returned None "
+                f"for switches {state['p2_switches']}"
+            )
+        return {switch_action: 1.0}
+
+    raise RuntimeError(
+        "get_opponent_move_weights: opponent has no legal moves or switches"
+    )
+
+
 class PokemonMCTS(MCTS):
     """Concrete MCTS for Pokémon battles.
 
@@ -603,21 +728,16 @@ class PokemonMCTS(MCTS):
         return actions
 
     def _expand(self, node, state, untried):
-        """Expansion phase: filter voluntary switches at non-root nodes."""
-        if node.parent is not None:
+        """Expansion phase: filter voluntary switches when not permitted."""
+        if not can_player_switch(state):
             moves_only = [a for a in untried if not a.startswith('switch')]
             if moves_only:
                 untried = moves_only
         return super()._expand(node, state, untried)
 
     def _pick_p2_move(self, state: dict) -> Optional[str]:
-        """Select the best move for p2 using ai_flags, falling back to first move."""
-        if state["p2_moves"]:
-            scored = select_move_with_ai_flags(state, state["p2_moves"], player=2)
-            return scored if scored is not None else state["p2_moves"][0]
-        if state["p2_switches"]:
-            return select_switch_in(state, state["p2_switches"], player=2)
-        return None
+        """Select the best action for p2. Delegates to _pick_opponent_action."""
+        return _pick_opponent_action(state)
 
     def _pick_p1_move(self, state: dict) -> Optional[str]:
         """Select the best move for p1 using ai_flags, falling back to first move."""
@@ -629,30 +749,11 @@ class PokemonMCTS(MCTS):
         return None
 
     def apply_action(self, state: dict, action: str) -> dict:
-        data = {"battle": _rand_battle(state["battle"]), "p1": action}
         p2 = state.get('_p2_forced') or self._pick_p2_move(state)
-        if p2 is not None:
-            data["p2"] = p2
         _t0 = time.perf_counter()
-        response = self.ipc.send(data)
+        new_state = simulate_turn(self.ipc, state, action, p2)
         if self.timing_stats is not None:
             self.timing_stats.add(time.perf_counter() - _t0)
-        new_state = parse_ipc_response(response)
-        # If only p2 needs to act (opponent forced switch), advance automatically.
-        while (not new_state["is_over"]
-               and not new_state["p1_moves"]
-               and not new_state["p1_switches"]):
-            data = {"battle": _rand_battle(new_state["battle"])}
-            p2 = self._pick_p2_move(new_state)
-            if p2 is not None:
-                data["p2"] = p2
-            else:
-                break
-            _t0 = time.perf_counter()
-            response = self.ipc.send(data)
-            if self.timing_stats is not None:
-                self.timing_stats.add(time.perf_counter() - _t0)
-            new_state = parse_ipc_response(response)
         return new_state
 
     def is_terminal(self, state: dict) -> bool:
@@ -894,8 +995,9 @@ def _resolve_action_name(action: str, state: dict, player: int = 1) -> str:
 
 def play_game(ipc, player_team_str: str, opp_team_str: str,
               mcts: PokemonMCTS, mcts_iterations: int = 10,
-              record_path: Optional[str] = None) -> BattleResult:
-    """Play one full battle, selecting player actions with MCTS.
+              record_path: Optional[str] = None,
+              decision_fn=None) -> BattleResult:
+    """Play one full battle, selecting player actions with MCTS or a custom function.
 
     Always writes per-turn debug files (cleared at battle start):
       debug_summary.txt — human-readable turn summaries
@@ -905,10 +1007,15 @@ def play_game(ipc, player_team_str: str, opp_team_str: str,
         ipc: NodeIPC instance.
         player_team_str: IPC team string for the player.
         opp_team_str: IPC team string for the opponent.
-        mcts: PokemonMCTS instance used for action selection.
-        mcts_iterations: Number of MCTS search iterations per move.
+        mcts: PokemonMCTS instance used for action selection and state advancement.
+        mcts_iterations: Number of MCTS search iterations per move (ignored when
+            decision_fn is provided).
         record_path: If set, write raw per-turn MCTS data to ``{record_path}.json``.
             The ``.json`` extension is appended automatically if not present.
+            Ignored when decision_fn is provided.
+        decision_fn: Optional callable(ipc, state) -> str.  If provided, replaces
+            MCTS for player action selection.  State advancement (apply_action) still
+            uses the mcts instance so opponent moves and timing tracking are unchanged.
 
     Returns:
         BattleResult with winner ("p1", "p2", or "unknown") and turn count.
@@ -942,7 +1049,9 @@ def play_game(ipc, player_team_str: str, opp_team_str: str,
         turn_wall_start = time.perf_counter()
         timing.reset()
 
-        if recording:
+        if decision_fn is not None:
+            action = decision_fn(ipc, state)
+        elif recording:
             battle = state["battle"]
             sides = battle.get("sides", [])
             p1_side = sides[0] if len(sides) > 0 else {}
