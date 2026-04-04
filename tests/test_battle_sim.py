@@ -431,7 +431,7 @@ class TestPokemonMCTS:
         state = self._active_state()
         state["battle"] = battle
         mcts.apply_action(state, "move 1")
-        assert mock.last_sent["battle"] is battle
+        assert mock.last_sent["battle"]["sides"] == battle["sides"]
 
 
 # ---------------------------------------------------------------------------

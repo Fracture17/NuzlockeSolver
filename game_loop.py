@@ -69,18 +69,14 @@ _SAVESTATE_FILETYPES = [('Save states', '*.state'), ('All files', '*.*')]
 
 SCAN_ADDR = 0x02024744   # gEnemyParty
 MAX_VALID_SPECIES = 440   # species IDs above this after decryption are garbage
-LEVEL_CAP = 19            # Party Pokémon are capped to this level every frame
+LEVEL_CAP = 24            # Party Pokémon are capped to this level every frame
 
 # ─── Testing mode — bypass MCTS and use a fixed action sequence ───────────────
 TESTING_MODE    = False
 TEST_ACTIONS    = ['move 3']  # cycles if battle exceeds list length
 
 # ─── Badge boosts — set True for each badge earned that boosts stats ──────────
-BADGE_BOOST_ATK = True   # Stone Badge   → Attack
-BADGE_BOOST_DEF = False   # Knuckle Badge → Defense
-BADGE_BOOST_SPA = False   # Heat Badge    → Sp. Attack
-BADGE_BOOST_SPD = False   # Balance Badge → Sp. Defense
-BADGE_BOOST_SPE = False   # Dynamo Badge  → Speed
+from config import BADGE_BOOST_ATK, BADGE_BOOST_DEF, BADGE_BOOST_SP, BADGE_BOOST_SPE
 
 # ─── Per-frame script constants ───────────────────────────────────────────────
 _SAVE1_PTR    = 0x03005D8C   # IWRAM pointer to save block 1
@@ -448,8 +444,8 @@ def main():
                                 badge_boosts={
                                     'atkBoost': BADGE_BOOST_ATK,
                                     'defBoost': BADGE_BOOST_DEF,
-                                    'spaBoost': BADGE_BOOST_SPA,
-                                    'spdBoost': BADGE_BOOST_SPD,
+                                    'spaBoost': BADGE_BOOST_SP,
+                                    'spdBoost': BADGE_BOOST_SP,
                                     'speBoost': BADGE_BOOST_SPE,
                                 },
                                 test_actions=TEST_ACTIONS if TESTING_MODE else None,

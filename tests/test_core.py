@@ -19,7 +19,7 @@ from test2 import build_scores, select_best_team
 
 def make_result(score=0.5, action_stats=None):
     """Return a MatchupResult with the given score and optional action_stats."""
-    return MatchupResult(score=score, action_stats=action_stats or {})
+    return MatchupResult(score=score, action_stats=action_stats or {}, num_runs=1, variance=0.0)
 
 
 def make_pmi(my_pokemon, opp_pokemon, score, action_stats=None):
@@ -54,12 +54,12 @@ def make_matchup_info_instance(raw_matchup_info):
 
 class TestMatchupResult:
     def test_fields(self):
-        r = MatchupResult(score=0.75, action_stats={"move 1": 0.8, "move 2": 0.4})
+        r = MatchupResult(score=0.75, action_stats={"move 1": 0.8, "move 2": 0.4}, num_runs=5, variance=0.1)
         assert r.score == pytest.approx(0.75)
         assert r.action_stats["move 1"] == pytest.approx(0.8)
 
     def test_empty_action_stats(self):
-        r = MatchupResult(score=0.0, action_stats={})
+        r = MatchupResult(score=0.0, action_stats={}, num_runs=1, variance=0.0)
         assert r.score == 0.0
         assert r.action_stats == {}
 

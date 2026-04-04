@@ -11,7 +11,8 @@ class NodeIPC:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=None,  # let Node print errors to terminal
-            bufsize=0
+            bufsize=0,
+            start_new_session=True,
         )
         self.lock = threading.Lock()
 

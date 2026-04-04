@@ -208,11 +208,19 @@ class TestFlag0:
         ctx = _ctx(move=move, target=target)
         assert apply_flag0(ctx, ALWAYS) == -10
 
-    def test_paralyze_vs_electric_type(self):
-        move = _move(cat=MoveCategory.STATUS, effect=MoveEffect.PARALYZE)
-        target = _poke(types=[PokeType.ELECTRIC])
+    def test_paralyze_vs_ground_type(self):
+        # Thunder Wave is Electric-type; Ground is immune to Electric → -10
+        move = _move(type=PokeType.ELECTRIC, cat=MoveCategory.STATUS, effect=MoveEffect.PARALYZE)
+        target = _poke(types=[PokeType.GROUND])
         ctx = _ctx(move=move, target=target)
         assert apply_flag0(ctx, ALWAYS) == -10
+
+    def test_paralyze_vs_electric_type(self):
+        # Electric resists Electric (0.5×) but is NOT immune → no -10 penalty
+        move = _move(type=PokeType.ELECTRIC, cat=MoveCategory.STATUS, effect=MoveEffect.PARALYZE)
+        target = _poke(types=[PokeType.ELECTRIC])
+        ctx = _ctx(move=move, target=target)
+        assert apply_flag0(ctx, ALWAYS) == 0
 
     def test_paralyze_vs_limber(self):
         move = _move(cat=MoveCategory.STATUS, effect=MoveEffect.PARALYZE)
@@ -469,7 +477,8 @@ class TestFlag2:
         move = _move(name="explosion", effect=MoveEffect.EXPLODE, cat=MoveCategory.STATUS)
         user = _poke(hp_pct=20)
         ctx = _ctx(move=move, user=user)
-        assert apply_flag2(ctx, ALWAYS) == 1
+        # HP=20: both +1 tiers apply (<=50 and <=30), so +2 with ALWAYS
+        assert apply_flag2(ctx, ALWAYS) == 2
 
     def test_atk_boost_low_stage_full_hp_always(self):
         move = _move(name="sd", cat=MoveCategory.STATUS, effect=MoveEffect.ATK_UP)
@@ -498,8 +507,9 @@ class TestFlag2:
         assert apply_flag2(ctx, ALWAYS) == 3
 
     def test_evasion_boost_high_hp_always(self):
+        # Source: only applies +3 bonus when HP >= 90%; HP=95 exercises that path
         move = _move(name="double team", cat=MoveCategory.STATUS, effect=MoveEffect.EVA_UP)
-        user = _poke(hp_pct=80)
+        user = _poke(hp_pct=95)
         ctx = _ctx(move=move, user=user)
         assert apply_flag2(ctx, ALWAYS) == 3
 
@@ -533,7 +543,9 @@ class TestFlag2:
                      effect=MoveEffect.DESTINY_BOND)
         user = _poke(hp_pct=20)
         ctx = _ctx(move=move, user=user)
-        assert apply_flag2(ctx, ALWAYS) == 2
+        # -1 always; equal speed = user not slower; HP<=70,<=50,<=30 all apply
+        # → -1 + 1 + 1 + 2 = +3 with ALWAYS
+        assert apply_flag2(ctx, ALWAYS) == 3
 
     def test_substitute_high_hp(self):
         move = _move(name="substitute", cat=MoveCategory.STATUS, effect=MoveEffect.SUBSTITUTE)

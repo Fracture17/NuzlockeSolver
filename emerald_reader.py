@@ -78,8 +78,8 @@ RAM_DUMP_FILE = os.path.join(_HERE, "ram_ewram.bin")
 # gBattleMons: BattlePokemon[4], 0x58 bytes each.  [0]=player, [1]=opponent
 BATTLE_MONS_ADDR     = 0x02024084  # from pokeemerald.sym (size 0x160)
 BATTLE_MON_SIZE      = 0x58        # sizeof(BattlePokemon)
-BATTLE_MON_MOVES_OFF   = 0x00      # u16[4] moves at offset 0 within struct
-BATTLE_MON_STATUS2_OFF = 0x24      # u32 volatile-status flags (status2) within struct
+BATTLE_MON_MOVES_OFF   = 0x0C      # u16[4] moves at struct offset 0x0C (after species + 5 stats)
+BATTLE_MON_STATUS2_OFF = 0x50      # u32 volatile-status flags (status2) at struct offset 0x50
 
 # status2 bit masks (see pokeemerald include/constants/battle.h)
 STATUS2_CONFUSION = 0x0000001C     # bits 2-4: 3-bit confusion turn counter (nonzero = confused)

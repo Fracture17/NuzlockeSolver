@@ -40,7 +40,8 @@ class MCTSNode:
 
     #Returns None when node has no children, likely due to parallel workers
     def best_child(self, exploration_weight: float = 1.414,
-                   action_penalty_fn=None) -> 'MCTSNode':
+                   action_penalty_fn=None,
+                   exclude_fn=None) -> 'MCTSNode':
         """
         Select the best child using UCB1 formula.
 
@@ -48,6 +49,8 @@ class MCTSNode:
             exploration_weight: UCB1 exploration parameter (default sqrt(2))
             action_penalty_fn: Optional callable(action) -> float added to UCB1 for
                                comparison only. Does not affect stored values.
+            exclude_fn: Optional callable(action) -> bool; children for which this
+                        returns True are removed from consideration entirely.
 
         Returns:
             Child node with highest UCB1 value
@@ -57,13 +60,18 @@ class MCTSNode:
         if len(self.children) == 0:
             return None
 
+        candidates = (self.children if exclude_fn is None
+                      else [c for c in self.children if not exclude_fn(c.action)])
+        if not candidates:
+            return None
+
         def score(child):
             ucb = child.ucb1(exploration_weight)
             if action_penalty_fn is not None:
                 ucb += action_penalty_fn(child.action)
             return ucb
 
-        return max(self.children, key=score)
+        return max(candidates, key=score)
 
     def ucb1(self, exploration_weight: float = 1.414) -> float:
         """

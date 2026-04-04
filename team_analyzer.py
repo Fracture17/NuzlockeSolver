@@ -23,6 +23,7 @@ import re
 
 from MatchupInfo import MatchupInfo
 from NodeIPC import NodeIPC
+from config import BADGE_BOOST_ATK, BADGE_BOOST_DEF, BADGE_BOOST_SP, BADGE_BOOST_SPE
 
 _HERE         = os.path.dirname(os.path.abspath(__file__))
 PLAYER_FILE   = os.path.join(_HERE, "PlayerPokemon.txt")
@@ -186,6 +187,14 @@ def build_matchup_info(node_script_path: str, level_multiplier: float = 1.0,
 
     box_raw = box_raw
 
+    badge_boosts = {
+        'atkBoost': BADGE_BOOST_ATK,
+        'defBoost': BADGE_BOOST_DEF,
+        'spaBoost': BADGE_BOOST_SP,
+        'spdBoost': BADGE_BOOST_SP,
+        'speBoost': BADGE_BOOST_SPE,
+    }
+
     return MatchupInfo(
         node_script_path,
         level_multiplier=level_multiplier,
@@ -194,6 +203,7 @@ def build_matchup_info(node_script_path: str, level_multiplier: float = 1.0,
         num_runs=num_runs,
         box_raw=box_raw,
         opp_raw=opp_raw,
+        badge_boosts=badge_boosts,
     )
 
 

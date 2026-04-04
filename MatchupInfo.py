@@ -172,7 +172,8 @@ def matchup_reward(state: dict, player: int = 1) -> float:
 def _run_mcts_context(ipc, mcts, team1, team2,
                       setup_p1, setup_p2, mcts_iterations, num_runs,
                       max_runs=8, sem_threshold=0.1,
-                      turn_limit=10, convergence_penalty=1.0):
+                      turn_limit=10, convergence_penalty=1.0,
+                      badge_boosts=None):
     """Play out battles using MCTS until the score estimate converges. Returns MatchupResult.
 
     Runs at least num_runs times, then continues until the standard error of the mean
@@ -208,7 +209,7 @@ def _run_mcts_context(ipc, mcts, team1, team2,
     aggregated = {}  # action -> [total_value, total_visits]
 
     while True:
-        resp = ipc.send({"new": True, "team1": team1, "team2": team2})
+        resp = ipc.send({"new": True, "team1": team1, "team2": team2, **(badge_boosts or {})})
         state = parse_ipc_response(resp)
 
         if setup_p1 is not None:
@@ -273,7 +274,7 @@ class MatchupInfo:
                  num_workers: int = 1, mcts_iterations: int = 100, num_runs: int = 3,
                  max_runs: int = 8, sem_threshold: float = 0.1,
                  turn_limit: int = 10, convergence_penalty: float = 1.0,
-                 box_raw=None, opp_raw=None):
+                 box_raw=None, opp_raw=None, badge_boosts=None):
         """Generate full matchup data for all BOX vs OPPONENT combinations using MCTS.
 
         Args:
@@ -293,6 +294,7 @@ class MatchupInfo:
         from battle_sim import PokemonMCTS
         self.node_script_path = node_script_path
         self.level_multiplier = level_multiplier
+        self.badge_boosts = badge_boosts
         self.box, self.opp = get_teams_at_level(level_multiplier, box_raw=box_raw, opp_raw=opp_raw)
 
         self.rawMatchupInfo = {p: {p2: {} for p2 in self.opp} for p in self.box}
@@ -323,6 +325,7 @@ class MatchupInfo:
                         mcts_iterations=mcts_iterations, num_runs=num_runs,
                         max_runs=max_runs, sem_threshold=sem_threshold,
                         turn_limit=turn_limit, convergence_penalty=convergence_penalty,
+                        badge_boosts=self.badge_boosts,
                     )
                     print(p, p2, contexts[None])
 

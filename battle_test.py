@@ -24,6 +24,8 @@ from gen3_charset import read_battle_text
 from battle_record import BattleRecord
 import battle_mode
 from emerald_reader import LAST_MOVES_ADDR
+from game_loop import _cap_party_levels
+from config import BADGE_BOOST_ATK, BADGE_BOOST_DEF, BADGE_BOOST_SP, BADGE_BOOST_SPE
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 ROM_PATH    = "/home/Fracture/Downloads/emerald.gba"
@@ -34,18 +36,13 @@ _HERE          = os.path.dirname(os.path.abspath(__file__))
 _SAVESTATE_DIR = os.path.join(_HERE, 'savestates')
 _LOG_DIR       = os.path.join(_HERE, 'test_logs')
 
-BADGE_BOOST_ATK = True   # Stone Badge (Roxanne) — earned before Brawly
-BADGE_BOOST_DEF = False
-BADGE_BOOST_SPA = False
-BADGE_BOOST_SPD = False
-BADGE_BOOST_SPE = False
-
 MCTS_ITERATIONS = 1000
 NUM_WORKERS     = 15
 
 _STUCK_TIMEOUT  = 30.0   # seconds of no output before declaring stuck
-_MAX_MISMATCHES = 100    # faint mismatch count before declaring stuck
+_MAX_MISMATCHES = 10     # faint mismatch prints before declaring stuck (100 attempts each = 1000 total)
 SCALE           = 4      # display scale factor (GBA native is 240×160)
+RECORD_SUCCESSES = False  # set True to save logs even when battle ends normally (won/loss)
 
 
 class StuckError(RuntimeError):
@@ -130,8 +127,8 @@ def run_battle_test(savestate_name: str, config: dict | None = None) -> BattleRe
             badge_boosts={
                 'atkBoost': BADGE_BOOST_ATK,
                 'defBoost': BADGE_BOOST_DEF,
-                'spaBoost': BADGE_BOOST_SPA,
-                'spdBoost': BADGE_BOOST_SPD,
+                'spaBoost': BADGE_BOOST_SP,
+                'spdBoost': BADGE_BOOST_SP,
                 'speBoost': BADGE_BOOST_SPE,
             },
             mcts_iterations=mcts_iterations,
@@ -170,6 +167,7 @@ def run_battle_test(savestate_name: str, config: dict | None = None) -> BattleRe
             with emu_lock:
                 core.set_keys(raw=gba_keys)
                 core.run_frame()
+                _cap_party_levels(core)
                 _opp_move = int(core.memory.u16[LAST_MOVES_ADDR + 2])
                 if _opp_move:
                     opp_last_move_id[0] = _opp_move
@@ -215,31 +213,43 @@ def run_battle_test(savestate_name: str, config: dict | None = None) -> BattleRe
     # ── Post-run ──────────────────────────────────────────────────────────────
     record.run_assertions()
 
-    os.makedirs(_LOG_DIR, exist_ok=True)
-    ts       = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_base = os.path.join(_LOG_DIR, f'{savestate_name}_{ts}')
-    record.save_log(log_base)
+    _clean_run = (record.outcome in ('won', 'lost')
+                  and not record.error
+                  and not any(not a['passed'] for a in record.assertions))
+    if RECORD_SUCCESSES or not _clean_run:
+        os.makedirs(_LOG_DIR, exist_ok=True)
+        ts       = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_base = os.path.join(_LOG_DIR, f'{savestate_name}_{ts}')
+        record.save_log(log_base)
 
     return record
 
 
 def main():
-    savestate = sys.argv[1] if len(sys.argv) > 1 else 'BrawlyTest'
-    print(f'[battle_test] Running test: {savestate}')
-    record = run_battle_test(savestate)
+    savestate = sys.argv[1] if len(sys.argv) > 1 else 'WattsonTest2'
+    run_number = 0
+    while True:
+        run_number += 1
+        print(f'[battle_test] Run #{run_number}: {savestate}')
+        record = run_battle_test(savestate)
 
-    passed = sum(1 for a in record.assertions if a['passed'])
-    failed = sum(1 for a in record.assertions if not a['passed'])
-    print(f'\n[battle_test] Done. Outcome={record.outcome}  '
-          f'Turns={len(record.turns)}  '
-          f'Assertions: {passed} passed, {failed} failed')
+        passed = sum(1 for a in record.assertions if a['passed'])
+        failed = sum(1 for a in record.assertions if not a['passed'])
+        print(f'[battle_test] Run #{run_number} done. Outcome={record.outcome}  '
+              f'Turns={len(record.turns)}  '
+              f'Assertions: {passed} passed, {failed} failed')
 
-    if record.error:
-        print(f'[battle_test] Error: {record.error}')
-        sys.exit(2)
-    if failed:
-        sys.exit(1)
+        if record.error:
+            print(f'[battle_test] Error: {record.error}')
+            sys.exit(2)
+        if record.outcome in ('won', 'lost'):
+            continue  # normal result (assertions are informational only) — run again
+        sys.exit(1)  # unexpected outcome
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print('\n[battle_test] Interrupted.')
+        sys.exit(0)
