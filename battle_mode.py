@@ -498,56 +498,7 @@ _FAINT_SCREEN_STABLE = 10   # consecutive frames battler_fainted & 1 required be
 _REFRESH_AFTER       = 5    # reconcile attempts before re-checking GBA active index
 _TEXT_STABLE_FRAMES  = 4    # consecutive stable frames before recording a battle text string
 
-_MCTS_PYTHON = os.path.join(_HERE, '.venv_t', 'bin', 'python3.14t')
-_MCTS_SERVER = os.path.join(_HERE, 'mcts_server.py')
-
-
-class MCTSProcess:
-    """Wraps a long-lived .venv_t/bin/python3.14t mcts_server.py subprocess.
-
-    Uses the same 4-byte big-endian length + JSON framing as NodeIPC.
-    The subprocess runs with PYTHON_GIL=0 for true free-threaded parallelism.
-    """
-
-    def __init__(self, node_script_path: str, num_workers: int = 5):
-        env = os.environ.copy()
-        env['PYTHON_GIL'] = '0'
-        self._proc = subprocess.Popen(
-            [_MCTS_PYTHON, _MCTS_SERVER],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            cwd=_HERE, env=env, bufsize=0,
-            start_new_session=True,
-        )
-        self._node_script = node_script_path
-        self._num_workers = num_workers
-
-    def search(self, ps_state: dict, iterations: int):
-        """Run MCTS in the subprocess. Returns (best_action, stats_list)."""
-        req  = {'node_script': self._node_script, 'state': ps_state,
-                'iterations': iterations, 'num_workers': self._num_workers}
-        data = json.dumps(req).encode()
-        self._proc.stdin.write(struct.pack('>I', len(data)) + data)
-        self._proc.stdin.flush()
-        length = struct.unpack('>I', self._read_exact(4))[0]
-        resp   = json.loads(self._read_exact(length))
-        return resp['action'], resp['stats']
-
-    def _read_exact(self, n: int) -> bytes:
-        buf = b''
-        while len(buf) < n:
-            chunk = self._proc.stdout.read(n - len(buf))
-            if not chunk:
-                raise EOFError('[MCTSProcess] subprocess stdout closed unexpectedly')
-            buf += chunk
-        return buf
-
-    def close(self):
-        try:
-            self._proc.stdin.close()
-        except OSError:
-            pass
-        self._proc.terminate()
-        self._proc.wait()
+from search_process import MCTSProcess, ShallowSearchProcess
 
 
 def _resolve_move_name(action: str, state: dict, side_idx: int) -> str | None:
@@ -585,6 +536,7 @@ class BattleResources(NamedTuple):
     test_actions:     list | None
     recorder:         object
     val_log:          object
+    decision_fn:      object        # callable(ipc, state)->str, or None to use MCTS
 
 
 @dataclass
@@ -688,6 +640,13 @@ def _select_best_action(res: BattleResources, state: BattleLoopState,
         action = res.test_actions[state.test_action_idx % len(res.test_actions)]
         state.test_action_idx += 1
         print(f'[battle_loop] Test action [{state.test_action_idx - 1}]: {action}')
+        return action, []
+
+    if res.decision_fn is not None:
+        _t0 = time.monotonic()
+        state.ps_state["known_p2"] = known_p2
+        action = res.decision_fn(res.ipc, state.ps_state)
+        print(f'[battle_loop] decision_fn chose {action!r} in {time.monotonic() - _t0:.2f}s')
         return action, []
 
     p1sw  = state.last_p1_action is not None and state.last_p1_action.startswith('switch')
@@ -1067,8 +1026,8 @@ def _select_and_inject_action(res: BattleResources, state: BattleLoopState,
     if known_p2:
         print(f'[battle_loop] Opponent will use {known_p2} this turn — injecting into MCTS')
     best_action, mcts_stats = _select_best_action(res, state, known_p2)
-    best_action, penalties  = _apply_bad_rng_penalty(res, state, best_action, mcts_stats)
-    best_action = _apply_ai_flag_override(state, best_action, mcts_stats, penalties)
+    #best_action, penalties  = _apply_bad_rng_penalty(res, state, best_action, mcts_stats)
+    #best_action = _apply_ai_flag_override(state, best_action, mcts_stats, penalties)
     if best_action is None:
         print('[battle_loop] Warning: MCTS returned no action')
         return False
@@ -1226,8 +1185,10 @@ def run_battle_loop(core, emu_lock, node_script_path, injected_keys,
                     opp_last_move_id=None,
                     badge_boosts: dict | None = None,
                     mcts_iterations: int = 1000, num_workers: int = 15,
+                    shallow_workers: int = 30,
                     test_actions: list | None = None,
-                    recorder: 'BattleRecord | None' = None):
+                    recorder: 'BattleRecord | None' = None,
+                    decision_fn=None):
     """Run the full battle autonomously from the first menu detection until battle end.
 
     Polls gBattleCommunication[0] at ~30 Hz.  When not at the battle menu, injects
@@ -1243,6 +1204,9 @@ def run_battle_loop(core, emu_lock, node_script_path, injected_keys,
     abilities_db = _load_db('gen3_abilities.json')
     ipc          = NodeIPC(node_script_path)
     mcts_proc    = MCTSProcess(node_script_path, num_workers=num_workers)
+    shallow_proc = ShallowSearchProcess(node_script_path, num_workers=shallow_workers)
+    if decision_fn is None:
+        decision_fn = lambda _ipc, state: shallow_proc.search(state)
     log_dir      = os.path.join(_HERE, 'test_logs')
     os.makedirs(log_dir, exist_ok=True)
     val_log_path = os.path.join(log_dir, f'validation_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
@@ -1253,11 +1217,12 @@ def run_battle_loop(core, emu_lock, node_script_path, injected_keys,
         species_db=species_db, moves_db=moves_db, items_db=items_db, abilities_db=abilities_db,
         opp_last_move_id=opp_last_move_id, badge_boosts=badge_boosts,
         mcts_iterations=mcts_iterations, test_actions=test_actions,
-        recorder=recorder, val_log=val_log,
+        recorder=recorder, val_log=val_log, decision_fn=decision_fn,
     )
     try:
         _run_loop(res, BattleLoopState(), injected_keys)
     finally:
+        shallow_proc.close()
         mcts_proc.close()
         ipc.close()
         val_log.close()

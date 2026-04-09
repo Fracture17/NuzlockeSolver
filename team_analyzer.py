@@ -204,6 +204,7 @@ def build_matchup_info(node_script_path: str, level_multiplier: float = 1.0,
         box_raw=box_raw,
         opp_raw=opp_raw,
         badge_boosts=badge_boosts,
+        use_mcts=False,
     )
 
 

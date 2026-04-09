@@ -446,7 +446,8 @@ def build_battle_context(
         for i, s in enumerate(user_pokemon.get("moveSlots", []), 1):
             if s.get("id") == slot_id:
                 raw = raw_calcs.get(f"move {i}", 0) or 0
-                move_damage_pcts[slot_mi.name] = raw / target_maxhp * 100
+                roll = random.randint(85, 100) / 100  # Emerald: 100 - (Random() % 16)
+                move_damage_pcts[slot_mi.name] = raw * roll / target_maxhp * 100
                 break
 
     is_first_battle_turn = battle.get("turn", 1) <= 1
@@ -616,7 +617,8 @@ def can_player_switch(state: dict) -> bool:
     return False
 
 
-def simulate_turn(ipc, state: dict, p1_action: str, p2_action: Optional[str]) -> dict:
+def simulate_turn(ipc, state: dict, p1_action: str, p2_action: Optional[str],
+                  flags: dict = None) -> dict:
     """Simulate one battle turn via IPC and return the resulting state.
 
     Randomizes the PRNG on every call to ensure diverse RNG outcomes.
@@ -627,16 +629,36 @@ def simulate_turn(ipc, state: dict, p1_action: str, p2_action: Optional[str]) ->
         state: Current battle state dict (from parse_ipc_response).
         p1_action: Player's action string ("move N" or "switch N").
         p2_action: Opponent's action string, or None if the opponent has no action.
+        flags: Optional dict of simulator flags (e.g. P1QuantizedRNG, P1ForceCrit).
+               Applied to the attack turn only, not to forced-switch follow-ups.
 
     Returns:
-        New battle state dict from parse_ipc_response.
+        New battle state dict from parse_ipc_response, with added keys:
+        - p1_crit_chance: float or None — crit probability for p1's move this turn.
+        - p2_crit_chance: float or None — crit probability for p2's move this turn.
+        - p1_accuracy_chance: float or None — hit probability for p1's move this turn.
+        - p2_accuracy_chance: float or None — hit probability for p2's move this turn.
+        - p1_secondary_chance: float or None — secondary-effect probability for p1 this turn.
+        - p2_secondary_chance: float or None — secondary-effect probability for p2 this turn.
     """
     data = {"battle": _rand_battle(state["battle"]), "p1": p1_action}
     if p2_action is not None:
         data["p2"] = p2_action
-    new_state = parse_ipc_response(ipc.send(data))
+    if flags:
+        data.update(flags)
+
+    raw = ipc.send(data)
+    result = raw["result"]
+    p1_crit_chance     = result.get("p1CritChance")
+    p2_crit_chance     = result.get("p2CritChance")
+    p1_accuracy_chance = result.get("p1AccuracyChance")
+    p2_accuracy_chance = result.get("p2AccuracyChance")
+    p1_secondary_chance = result.get("p1SecondaryChance")
+    p2_secondary_chance = result.get("p2SecondaryChance")
+    new_state = parse_ipc_response(raw)
 
     # Auto-advance forced opponent switches (e.g. after a faint)
+    # Flags are intentionally omitted — no attack occurs during forced switches.
     while (not new_state["is_over"]
            and not new_state["p1_moves"]
            and not new_state["p1_switches"]):
@@ -646,6 +668,12 @@ def simulate_turn(ipc, state: dict, p1_action: str, p2_action: Optional[str]) ->
         data = {"battle": _rand_battle(new_state["battle"]), "p2": p2}
         new_state = parse_ipc_response(ipc.send(data))
 
+    new_state["p1_crit_chance"]     = p1_crit_chance
+    new_state["p2_crit_chance"]     = p2_crit_chance
+    new_state["p1_accuracy_chance"] = p1_accuracy_chance
+    new_state["p2_accuracy_chance"] = p2_accuracy_chance
+    new_state["p1_secondary_chance"] = p1_secondary_chance
+    new_state["p2_secondary_chance"] = p2_secondary_chance
     return new_state
 
 
@@ -853,13 +881,13 @@ class PokemonMCTS(MCTS):
         score = 0
 
         # win, ignore most other factors
-        if p2_fainted == 6:
+        if p2_fainted == len(p2_pokemon) and p2_pokemon:
             score = 20
             score -= p1_fainted * 7
             return score if player == 1 else -score
 
         #loss
-        if p1_fainted == 6:
+        if p1_fainted == len(p1_pokemon) and p1_pokemon:
             score -= 20
 
         #Remaining health
@@ -909,7 +937,7 @@ class PokemonMCTS(MCTS):
         p1_fainted = sum(1 for p in p1_pokemon if p.get("hp", 0) <= 0)
         p2_fainted = sum(1 for p in p2_pokemon if p.get("hp", 0) <= 0)
 
-        if p2_fainted == 6:
+        if p2_fainted == len(p2_pokemon) and p2_pokemon:
             score = 10 - p1_fainted * 5
         else:
             score = p1_hp_sum - 2 * p2_hp_sum - 5 * p1_fainted

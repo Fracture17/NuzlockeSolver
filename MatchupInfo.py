@@ -168,34 +168,50 @@ def matchup_reward(state: dict, player: int = 1) -> float:
 # Standalone worker functions
 # ---------------------------------------------------------------------------
 
-#Don't need to pass both mcts and mcts_forbidden, just pass the one that should be used
-def _run_mcts_context(ipc, mcts, team1, team2,
-                      setup_p1, setup_p2, mcts_iterations, num_runs,
-                      max_runs=8, sem_threshold=0.1,
-                      turn_limit=10, convergence_penalty=1.0,
-                      badge_boosts=None):
-    """Play out battles using MCTS until the score estimate converges. Returns MatchupResult.
+def _apply_turn(ipc, state, p1_action):
+    """Apply one turn using the AI-flags opponent and return the new state.
 
-    Runs at least num_runs times, then continues until the standard error of the mean
-    (SEM = sample_std_dev / sqrt(n)) falls below sem_threshold, or max_runs is reached.
-    Each individual battle is cut off at turn_limit turns to prevent stalling.
-    If the result does not converge, avg_score is penalised by convergence_penalty * final_sem.
+    Picks the opponent action via _pick_opponent_action (same ai_flags logic used
+    during live battles), then calls simulate_turn with no extra RNG flags so
+    natural variance is preserved.  Forced switches are auto-advanced inside
+    simulate_turn.
+    """
+    from battle_sim import simulate_turn, _pick_opponent_action
+    opp_action = _pick_opponent_action(state)
+    return simulate_turn(ipc, state, p1_action, opp_action)
+
+
+def _run_matchup_context(ipc, decision_fn, team1, team2,
+                         setup_p1, setup_p2, num_runs,
+                         max_runs=8, sem_threshold=0.1,
+                         turn_limit=10, convergence_penalty=1.0,
+                         badge_boosts=None):
+    """Play out battles using decision_fn until the score estimate converges.
+
+    Returns MatchupResult.
+
+    Runs at least num_runs times, then continues until the standard error of the
+    mean (SEM = sample_std_dev / sqrt(n)) falls below sem_threshold, or max_runs
+    is reached.  Each individual battle is cut off at turn_limit turns to prevent
+    stalling.  If the result does not converge, avg_score is penalised by
+    convergence_penalty * final_sem.
 
     Each run:
       - Starts a fresh battle and applies the optional setup turn.
-      - Loops: MCTS search → apply best action → advance state, up to turn_limit turns.
-        Also stops when the battle ends or no legal actions remain.
+      - Loops: decision_fn(state) → _apply_turn → advance state, up to
+        turn_limit turns.  Also stops when the battle ends or no legal
+        actions remain.
       - Scores the final state with matchup_reward.
-    Action stats are captured from the first MCTS search (opening position).
 
     Args:
         ipc: NodeIPC instance.
-        mcts: PokemonMCTS instance (with reward_fn=matchup_reward for matchup contexts).
+        decision_fn: callable(state) -> str — returns best p1 action for the
+                     given battle state.  Can be shallow_proc.search or an MCTS
+                     lambda; both protocols are compatible.
         team1: IPC team string for player.
         team2: IPC team string for opponent.
         setup_p1: Player action for setup turn (None for direct matchup).
         setup_p2: Opponent action for setup turn (None for direct matchup).
-        mcts_iterations: MCTS iterations per search.
         num_runs: Minimum number of runs before checking convergence.
         max_runs: Hard cap on total runs regardless of SEM.
         sem_threshold: Stop early when SEM of scores drops below this value.
@@ -206,7 +222,6 @@ def _run_mcts_context(ipc, mcts, team1, team2,
     from battle_sim import parse_ipc_response
 
     scores = []
-    aggregated = {}  # action -> [total_value, total_visits]
 
     while True:
         resp = ipc.send({"new": True, "team1": team1, "team2": team2, **(badge_boosts or {})})
@@ -216,23 +231,14 @@ def _run_mcts_context(ipc, mcts, team1, team2,
             data = {"battle": state["battle"], "p1": setup_p1, "p2": setup_p2}
             state = parse_ipc_response(ipc.send(data))
 
-        first_search = True
         turn = 0
         while not state["is_over"]:
-            if not mcts.get_legal_actions(state) or turn >= turn_limit:
+            p1_actions = state.get("p1_moves") or state.get("p1_switches")
+            if not p1_actions or turn >= turn_limit:
                 break
 
-            best_action, root = mcts.search(state, mcts_iterations)
-
-            if first_search:
-                for child in root.children:
-                    if child.action not in aggregated:
-                        aggregated[child.action] = [0.0, 0]
-                    aggregated[child.action][0] += child.value
-                    aggregated[child.action][1] += child.visits
-                first_search = False
-
-            state = mcts.apply_action(state, best_action)
+            best_action = decision_fn(state)
+            state = _apply_turn(ipc, state, best_action)
             turn += 1
 
         scores.append(matchup_reward(state))
@@ -258,11 +264,25 @@ def _run_mcts_context(ipc, mcts, team1, team2,
     if final_sem >= sem_threshold:
         avg_score -= convergence_penalty * final_sem
 
-    action_stats = {
-        a: vals[0] / vals[1]
-        for a, vals in aggregated.items() if vals[1] > 0
-    }
-    return MatchupResult(score=avg_score, action_stats=action_stats, num_runs=len(scores), variance=round(final_sem, 4))
+    return MatchupResult(score=avg_score, action_stats={}, num_runs=len(scores),
+                         variance=round(final_sem, 4))
+
+
+def _run_mcts_context(ipc, mcts, team1, team2,
+                      setup_p1, setup_p2, mcts_iterations, num_runs,
+                      max_runs=8, sem_threshold=0.1,
+                      turn_limit=10, convergence_penalty=1.0,
+                      badge_boosts=None):
+    """Backward-compatible shim: delegates to _run_matchup_context with an MCTS decision_fn."""
+    return _run_matchup_context(
+        ipc,
+        lambda state: mcts.search(state, mcts_iterations)[0],
+        team1=team1, team2=team2,
+        setup_p1=setup_p1, setup_p2=setup_p2,
+        num_runs=num_runs, max_runs=max_runs, sem_threshold=sem_threshold,
+        turn_limit=turn_limit, convergence_penalty=convergence_penalty,
+        badge_boosts=badge_boosts,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -271,18 +291,23 @@ def _run_mcts_context(ipc, mcts, team1, team2,
 
 class MatchupInfo:
     def __init__(self, node_script_path: str, level_multiplier: float = 1.0,
-                 num_workers: int = 1, mcts_iterations: int = 100, num_runs: int = 3,
+                 num_workers: int = 4, mcts_iterations: int = 100, num_runs: int = 3,
                  max_runs: int = 8, sem_threshold: float = 0.1,
                  turn_limit: int = 10, convergence_penalty: float = 1.0,
-                 box_raw=None, opp_raw=None, badge_boosts=None):
-        """Generate full matchup data for all BOX vs OPPONENT combinations using MCTS.
+                 box_raw=None, opp_raw=None, badge_boosts=None,
+                 use_mcts: bool = False):
+        """Generate full matchup data for all BOX vs OPPONENT combinations.
+
+        By default uses the shallow search decision function (use_mcts=False).
+        Pass use_mcts=True to use MCTS instead (legacy behaviour).
 
         Args:
             node_script_path: Path to Connection.js (Node IPC script).
             level_multiplier: Scale factor applied to BOX pokemon's natural level.
                               0.6 → 60% of natural level, 1.0 → natural level.
-            num_workers: Number of MCTS worker threads per search (passed to PokemonMCTS).
-            mcts_iterations: MCTS iterations per run per matchup context.
+            num_workers: Number of parallel workers (shallow search IPC connections,
+                         or MCTS worker threads when use_mcts=True).
+            mcts_iterations: MCTS iterations per search (only used when use_mcts=True).
             num_runs: Minimum runs per matchup before checking for convergence.
             max_runs: Hard cap on runs per matchup regardless of SEM.
             sem_threshold: Stop adding runs when SEM of scores drops below this value.
@@ -290,8 +315,10 @@ class MatchupInfo:
             convergence_penalty: Multiplier on final SEM applied when a matchup does not converge.
             box_raw: Optional list of PS pipe strings overriding _BOX_RAW.
             opp_raw: Optional list of PS pipe strings overriding _OPP_RAW.
+            use_mcts: When True, use MCTS for decision-making; when False (default),
+                      use the shallow search sampler.
         """
-        from battle_sim import PokemonMCTS
+        from search_process import ShallowSearchProcess
         self.node_script_path = node_script_path
         self.level_multiplier = level_multiplier
         self.badge_boosts = badge_boosts
@@ -299,30 +326,40 @@ class MatchupInfo:
 
         self.rawMatchupInfo = {p: {p2: {} for p2 in self.opp} for p in self.box}
 
-        print(f"Generating matchup info (multiplier={level_multiplier}, "
-              f"mcts_workers={num_workers}, mcts_iterations={mcts_iterations}, "
-              f"min_runs={num_runs}, max_runs={max_runs}, sem_threshold={sem_threshold})...")
+        if use_mcts:
+            print(f"Generating matchup info (multiplier={level_multiplier}, "
+                  f"mcts_workers={num_workers}, mcts_iterations={mcts_iterations}, "
+                  f"min_runs={num_runs}, max_runs={max_runs}, sem_threshold={sem_threshold})...")
+        else:
+            print(f"Generating matchup info (multiplier={level_multiplier}, "
+                  f"shallow_workers={num_workers}, "
+                  f"min_runs={num_runs}, max_runs={max_runs}, sem_threshold={sem_threshold})...")
 
         ipc = NodeIPC(node_script_path)
+        search_proc = None
         try:
-            mcts = PokemonMCTS(ipc, node_script_path=node_script_path,
-                               simulation_depth_limit=10, num_workers=num_workers,
-                               reward_fn=matchup_reward, rollout_reward_fn=matchup_reward)
-            #Need to disable "switch 2" and not 1, because when the first switch happens the Pokemon actually swap slots
-            mcts_forbidden = PokemonMCTS(ipc, node_script_path=node_script_path,
-                                         simulation_depth_limit=10, num_workers=num_workers,
-                                         forbidden_actions={"switch 2"},
-                                         reward_fn=matchup_reward, rollout_reward_fn=matchup_reward)
+            if use_mcts:
+                from battle_sim import PokemonMCTS
+                mcts = PokemonMCTS(ipc, node_script_path=node_script_path,
+                                   simulation_depth_limit=10, num_workers=num_workers,
+                                   reward_fn=matchup_reward, rollout_reward_fn=matchup_reward)
+                decision_fn = lambda state: mcts.search(state, mcts_iterations)[0]
+            else:
+                search_proc = ShallowSearchProcess(node_script_path,
+                                                   num_workers=num_workers,
+                                                   verbose=False)
+                decision_fn = search_proc.search
+
             completed = 0
             total = len(self.box) * len(self.opp)
             for p in self.box:
                 for p2 in self.opp:
                     contexts = {}
-                    contexts[None] = _run_mcts_context(
-                        ipc, mcts,
+                    contexts[None] = _run_matchup_context(
+                        ipc, decision_fn,
                         team1=self.box[p], team2=self.opp[p2],
                         setup_p1=None, setup_p2=None,
-                        mcts_iterations=mcts_iterations, num_runs=num_runs,
+                        num_runs=num_runs,
                         max_runs=max_runs, sem_threshold=sem_threshold,
                         turn_limit=turn_limit, convergence_penalty=convergence_penalty,
                         badge_boosts=self.badge_boosts,
@@ -331,17 +368,19 @@ class MatchupInfo:
 
                     #Ignore switch in context for now
                     """for move_i in range(1, 5):
-                        contexts[move_i] = _run_mcts_context(
-                            ipc, mcts_forbidden,
+                        contexts[move_i] = _run_matchup_context(
+                            ipc, decision_fn,
                             team1=self.box[p] + ']' + self.box[p], team2=self.opp[p2],
                             setup_p1="switch 2", setup_p2=f"move {move_i}",
-                            mcts_iterations=mcts_iterations, num_runs=num_runs,
+                            num_runs=num_runs,
                         )"""
                     self.rawMatchupInfo[p][p2] = contexts
                     completed += 1
                     if completed % 10 == 0 or completed == total:
                         print(f"  {completed}/{total} pairs done")
         finally:
+            if search_proc is not None:
+                search_proc.close()
             ipc.close()
 
         self.prunedMatchupInfo = self.makePrunedMatchupInfo()

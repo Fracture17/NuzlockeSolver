@@ -33,3 +33,5 @@ analysis/*
 raw_data/*
 
 debug.ndjson
+
+test_logs/*
