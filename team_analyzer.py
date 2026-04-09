@@ -176,9 +176,9 @@ def parse_opponent_file(path: str = OPPONENT_FILE) -> list:
 # ─── MatchupInfo builder ──────────────────────────────────────────────────────
 
 def build_matchup_info(node_script_path: str, level_multiplier: float = 1.0,
-                       num_workers: int = 15, mcts_iterations: int = 100,
+                       num_workers: int = 15,
                        num_runs: int = 3) -> MatchupInfo:
-    """Parse the capture files and run MCTS for all player vs opponent pairings.
+    """Parse the capture files and run shallow search for all player vs opponent pairings.
 
     Returns a MatchupInfo whose prunedMatchupInfo contains one entry per pairing.
     """
@@ -199,12 +199,10 @@ def build_matchup_info(node_script_path: str, level_multiplier: float = 1.0,
         node_script_path,
         level_multiplier=level_multiplier,
         num_workers=num_workers,
-        mcts_iterations=mcts_iterations,
         num_runs=num_runs,
         box_raw=box_raw,
         opp_raw=opp_raw,
         badge_boosts=badge_boosts,
-        use_mcts=False,
     )
 
 
@@ -212,73 +210,14 @@ def build_matchup_info(node_script_path: str, level_multiplier: float = 1.0,
 
 def find_best_surviving_team(node_script_path: str, matchup_info,
                               n_games: int = 3,
-                              mcts_iterations: int = 100,
                               num_workers: int = 15):
     """Try teams in ranked order; return first that wins n_games without any Pokémon fainting.
 
-    Teams with the same lead and same set of non-lead members are considered identical
-    and skipped on subsequent encounters.
-
-    Prints progress as teams are tried, games are played, and results are determined.
-
-    Returns (score, team_tuple, assignment_dict) for the winning team, or None if all fail.
+    NOTE: This function requires redesign for shallow search and is not yet implemented.
     """
-    from battle_sim import (
-        PokemonMCTS, play_game, assemble_team_string,
-        assemble_opponent_string, reorder_team,
+    raise NotImplementedError(
+        "find_best_surviving_team needs redesign for shallow search (play_game removed)"
     )
-    from test2 import build_scores, select_best_team
-
-    raw_scores, _, _, opponents = build_scores(matchup_info.prunedMatchupInfo)
-    all_teams = select_best_team(matchup_info, n=10 ** 9)
-    opp_first = next(iter(matchup_info.opp))
-
-    ipc = NodeIPC(node_script_path)
-    try:
-        mcts = PokemonMCTS(ipc, node_script_path=node_script_path,
-                           simulation_depth_limit=10, num_workers=num_workers)
-
-        tried = set()
-        rank = 0
-        for score, team, assignment in all_teams:
-            ordered = reorder_team(list(team), assignment, opponents)
-            dedup_key = (ordered[0], frozenset(ordered[1:]))
-            if dedup_key in tried:
-                continue
-            tried.add(dedup_key)
-            rank += 1
-
-            print(f"\n=== Team #{rank}  score={score[0]:.4f},{score[1]:.4f} ===")
-            print(f"  Members (lead first): {', '.join(ordered)}")
-            print("  Matchup data:")
-            for p in ordered:
-                scores_str = "  ".join(
-                    f"{opp}: {raw_scores[p][opp]:+.3f}" for opp in opponents
-                )
-                print(f"    {p:<12}  {scores_str}")
-
-            player_str = assemble_team_string(ordered, matchup_info.box)
-            opp_str = assemble_opponent_string(opp_first, matchup_info.opp)
-
-            team_ok = True
-            for game_num in range(1, n_games + 1):
-                result = play_game(ipc, player_str, opp_str, mcts, mcts_iterations)
-                p1_fainted = any('|faint|p1' in line for line in result.log)
-                if p1_fainted or result.winner != 'p1':
-                    reason = "faint" if p1_fainted else "loss"
-                    print(f"  Game {game_num}: FAILED ({reason}) — moving to next team")
-                    team_ok = False
-                    break
-                print(f"  Game {game_num}: WIN — no faints")
-
-            if team_ok:
-                print(f"\n=== Selected team: {', '.join(ordered)} ===")
-                return score, team, assignment
-
-        print("\nAll teams failed.")
-        return None
-    finally:
-        ipc.close()
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────

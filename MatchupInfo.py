@@ -268,46 +268,23 @@ def _run_matchup_context(ipc, decision_fn, team1, team2,
                          variance=round(final_sem, 4))
 
 
-def _run_mcts_context(ipc, mcts, team1, team2,
-                      setup_p1, setup_p2, mcts_iterations, num_runs,
-                      max_runs=8, sem_threshold=0.1,
-                      turn_limit=10, convergence_penalty=1.0,
-                      badge_boosts=None):
-    """Backward-compatible shim: delegates to _run_matchup_context with an MCTS decision_fn."""
-    return _run_matchup_context(
-        ipc,
-        lambda state: mcts.search(state, mcts_iterations)[0],
-        team1=team1, team2=team2,
-        setup_p1=setup_p1, setup_p2=setup_p2,
-        num_runs=num_runs, max_runs=max_runs, sem_threshold=sem_threshold,
-        turn_limit=turn_limit, convergence_penalty=convergence_penalty,
-        badge_boosts=badge_boosts,
-    )
-
-
 # ---------------------------------------------------------------------------
 # MatchupInfo class
 # ---------------------------------------------------------------------------
 
 class MatchupInfo:
     def __init__(self, node_script_path: str, level_multiplier: float = 1.0,
-                 num_workers: int = 4, mcts_iterations: int = 100, num_runs: int = 3,
+                 num_workers: int = 4, num_runs: int = 3,
                  max_runs: int = 8, sem_threshold: float = 0.1,
                  turn_limit: int = 10, convergence_penalty: float = 1.0,
-                 box_raw=None, opp_raw=None, badge_boosts=None,
-                 use_mcts: bool = False):
+                 box_raw=None, opp_raw=None, badge_boosts=None):
         """Generate full matchup data for all BOX vs OPPONENT combinations.
-
-        By default uses the shallow search decision function (use_mcts=False).
-        Pass use_mcts=True to use MCTS instead (legacy behaviour).
 
         Args:
             node_script_path: Path to Connection.js (Node IPC script).
             level_multiplier: Scale factor applied to BOX pokemon's natural level.
                               0.6 → 60% of natural level, 1.0 → natural level.
-            num_workers: Number of parallel workers (shallow search IPC connections,
-                         or MCTS worker threads when use_mcts=True).
-            mcts_iterations: MCTS iterations per search (only used when use_mcts=True).
+            num_workers: Number of parallel shallow search IPC connections.
             num_runs: Minimum runs per matchup before checking for convergence.
             max_runs: Hard cap on runs per matchup regardless of SEM.
             sem_threshold: Stop adding runs when SEM of scores drops below this value.
@@ -315,8 +292,6 @@ class MatchupInfo:
             convergence_penalty: Multiplier on final SEM applied when a matchup does not converge.
             box_raw: Optional list of PS pipe strings overriding _BOX_RAW.
             opp_raw: Optional list of PS pipe strings overriding _OPP_RAW.
-            use_mcts: When True, use MCTS for decision-making; when False (default),
-                      use the shallow search sampler.
         """
         from search_process import ShallowSearchProcess
         self.node_script_path = node_script_path
@@ -326,29 +301,17 @@ class MatchupInfo:
 
         self.rawMatchupInfo = {p: {p2: {} for p2 in self.opp} for p in self.box}
 
-        if use_mcts:
-            print(f"Generating matchup info (multiplier={level_multiplier}, "
-                  f"mcts_workers={num_workers}, mcts_iterations={mcts_iterations}, "
-                  f"min_runs={num_runs}, max_runs={max_runs}, sem_threshold={sem_threshold})...")
-        else:
-            print(f"Generating matchup info (multiplier={level_multiplier}, "
-                  f"shallow_workers={num_workers}, "
-                  f"min_runs={num_runs}, max_runs={max_runs}, sem_threshold={sem_threshold})...")
+        print(f"Generating matchup info (multiplier={level_multiplier}, "
+              f"shallow_workers={num_workers}, "
+              f"min_runs={num_runs}, max_runs={max_runs}, sem_threshold={sem_threshold})...")
 
         ipc = NodeIPC(node_script_path)
         search_proc = None
         try:
-            if use_mcts:
-                from battle_sim import PokemonMCTS
-                mcts = PokemonMCTS(ipc, node_script_path=node_script_path,
-                                   simulation_depth_limit=10, num_workers=num_workers,
-                                   reward_fn=matchup_reward, rollout_reward_fn=matchup_reward)
-                decision_fn = lambda state: mcts.search(state, mcts_iterations)[0]
-            else:
-                search_proc = ShallowSearchProcess(node_script_path,
-                                                   num_workers=num_workers,
-                                                   verbose=False)
-                decision_fn = search_proc.search
+            search_proc = ShallowSearchProcess(node_script_path,
+                                               num_workers=num_workers,
+                                               verbose=False)
+            decision_fn = search_proc.search
 
             completed = 0
             total = len(self.box) * len(self.opp)

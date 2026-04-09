@@ -9,7 +9,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from battle_sim import (
-    BattleResult,
     parse_move_actions,
     parse_switch_actions,
     detect_winner,
@@ -17,14 +16,7 @@ from battle_sim import (
     assemble_team_string,
     assemble_opponent_string,
     reorder_team,
-    play_game,
-    PokemonMCTS,
 )
-
-
-# ---------------------------------------------------------------------------
-# Shared test infrastructure
-# ---------------------------------------------------------------------------
 
 class MockIPC:
     """Provides canned IPC responses in order; records all requests sent."""
@@ -41,13 +33,6 @@ class MockIPC:
             raise RuntimeError("MockIPC: response queue exhausted")
         return self._queue.pop(0)
 
-
-class DummyMCTS(PokemonMCTS):
-    """MCTS subclass that always picks the first legal action — no tree search."""
-
-    def get_best_action(self, state, iterations):
-        actions = self.get_legal_actions(state)
-        return actions[0] if actions else "move 1"
 
 
 def make_battle_state(p1_hp=0.8, p2_hp=0.8):
@@ -295,195 +280,3 @@ class TestReorderTeam:
         assert result == ["C", "A", "B"]  # C→Z first, A→X second, B flex last
 
 
-# ---------------------------------------------------------------------------
-# PokemonMCTS
-# ---------------------------------------------------------------------------
-
-class TestPokemonMCTS:
-    def _active_state(self, p1_moves=None, p1_switches=None, p2_moves=None, p2_switches=None):
-        return {
-            "battle": make_battle_state(),
-            "p1_moves": p1_moves if p1_moves is not None else ["move 1", "move 2"],
-            "p1_switches": p1_switches or [],
-            "p2_moves": p2_moves if p2_moves is not None else ["move 1"],
-            "p2_switches": p2_switches or [],
-            "is_over": False,
-            "winner": None,
-        }
-
-    def _terminal_state(self, winner="p1"):
-        hp = {"p1_hp": 0.5, "p2_hp": 0.0} if winner == "p1" else {"p1_hp": 0.0, "p2_hp": 0.5}
-        return {
-            "battle": make_battle_state(**hp),
-            "p1_moves": [], "p1_switches": [],
-            "p2_moves": [], "p2_switches": [],
-            "is_over": True,
-            "winner": winner,
-        }
-
-    def test_get_legal_actions_moves_and_switches(self):
-        mcts = PokemonMCTS(MockIPC([]))
-        state = self._active_state(p1_moves=["move 1", "move 2"], p1_switches=["switch 2"])
-        assert mcts.get_legal_actions(state) == ["move 1", "move 2", "switch 2"]
-
-    def test_get_legal_actions_switches_only(self):
-        mcts = PokemonMCTS(MockIPC([]))
-        state = self._active_state(p1_moves=[], p1_switches=["switch 2", "switch 3"])
-        assert mcts.get_legal_actions(state) == ["switch 2", "switch 3"]
-
-    def test_get_legal_actions_empty_when_terminal(self):
-        mcts = PokemonMCTS(MockIPC([]))
-        assert mcts.get_legal_actions(self._terminal_state()) == []
-
-    def test_is_terminal_true(self):
-        mcts = PokemonMCTS(MockIPC([]))
-        assert mcts.is_terminal(self._terminal_state()) is True
-
-    def test_is_terminal_false(self):
-        mcts = PokemonMCTS(MockIPC([]))
-        assert mcts.is_terminal(self._active_state()) is False
-
-    #These tests shouldn't exist because they limit using new reward functions
-    """def test_get_reward_p1_winning(self):
-        # p1_hp=0.5, p2_hp=0.0, p1_fainted=0 → 0.5 - 0 - 0 = 0.5
-        mcts = PokemonMCTS(MockIPC([]))
-        assert mcts.get_reward(self._terminal_state("p1"), player=1) == pytest.approx(0.5)
-
-    def test_get_reward_p2_winning(self):
-        # p1_hp=0.0, p2_hp=0.5, p1_fainted=1 → 0 - 1.0 - 5 = -6.0
-        mcts = PokemonMCTS(MockIPC([]))
-        assert mcts.get_reward(self._terminal_state("p2"), player=1) == pytest.approx(-6.0)
-
-    def test_get_reward_opponent_perspective_negated(self):
-        mcts = PokemonMCTS(MockIPC([]))
-        p1_score = mcts.get_reward(self._terminal_state("p1"), player=1)
-        p2_score = mcts.get_reward(self._terminal_state("p1"), player=-1)
-        assert p2_score == pytest.approx(-p1_score)
-
-    def test_get_reward_equal_hp_no_fainted(self):
-        # p1_hp=0.8, p2_hp=0.8, p1_fainted=0 → 0.8 - 1.6 - 0 = -0.8
-        mcts = PokemonMCTS(MockIPC([]))
-        assert mcts.get_reward(self._active_state(), player=1) == pytest.approx(0.8 - 2 * 0.8)
-
-    def test_get_reward_fainted_penalty(self):
-        # p1: one fainted (hp=0) + one full (hp=1), p2: one full (hp=1)
-        # score = 1.0 - 2*1.0 - 5*1 = -6.0
-        battle = {
-            "sides": [
-                {"pokemon": [{"hp": 0.0, "maxhp": 1.0}, {"hp": 1.0, "maxhp": 1.0}]},
-                {"pokemon": [{"hp": 1.0, "maxhp": 1.0}]},
-            ]
-        }
-        state = {
-            "battle": battle,
-            "p1_moves": ["move 1"], "p1_switches": [],
-            "p2_moves": ["move 1"], "p2_switches": [],
-            "is_over": False, "winner": None,
-        }
-        mcts = PokemonMCTS(MockIPC([]))
-        assert mcts.get_reward(state, player=1) == pytest.approx(-6.0)"""
-
-
-    def test_apply_action_sends_player_and_opponent_move(self):
-        mock = MockIPC([make_response(p1_moves="0")])
-        mcts = PokemonMCTS(mock)
-        state = self._active_state(p2_moves=["move 1"])
-        mcts.apply_action(state, "move 2")
-        assert mock.last_sent["p1"] == "move 2"
-        assert mock.last_sent["p2"] == "move 1"
-
-    def test_apply_action_uses_first_switch_when_no_moves(self):
-        mock = MockIPC([make_response(p1_moves="0")])
-        mcts = PokemonMCTS(mock)
-        state = self._active_state(p2_moves=[], p2_switches=["switch 2", "switch 3"])
-        mcts.apply_action(state, "move 1")
-        assert mock.last_sent["p2"] == "switch 2"
-
-    def test_apply_action_omits_p2_when_no_opp_actions(self):
-        mock = MockIPC([make_response(p1_moves="0")])
-        mcts = PokemonMCTS(mock)
-        state = self._active_state(p2_moves=[], p2_switches=[])
-        mcts.apply_action(state, "move 1")
-        assert "p2" not in mock.last_sent
-
-    def test_apply_action_returns_parsed_state(self):
-        mock = MockIPC([make_response(p1_moves="0", p1_hp=0.7, p2_hp=0.3)])
-        mcts = PokemonMCTS(mock)
-        new_state = mcts.apply_action(self._active_state(), "move 1")
-        assert new_state["is_over"] is False
-        assert new_state["p1_moves"] == ["move 1"]
-
-    def test_apply_action_auto_advances_through_p2_forced_switch(self):
-        """When the IPC result has no p1 actions but p2 must switch, apply_action
-        should automatically send p2's switch and return the following state."""
-        intermediate = make_response(p2_switches="1:2")          # p2 forced switch
-        normal = make_response(p1_moves="0:1", p2_moves="0")     # next normal state
-        mock = MockIPC([intermediate, normal])
-        mcts = PokemonMCTS(mock)
-        new_state = mcts.apply_action(self._active_state(), "move 1")
-        assert len(mock.all_sent) == 2
-        assert new_state["p1_moves"] == ["move 1", "move 2"]
-
-    def test_apply_action_passes_battle_state(self):
-        mock = MockIPC([make_response(p1_moves="0")])
-        mcts = PokemonMCTS(mock)
-        battle = make_battle_state()
-        state = self._active_state()
-        state["battle"] = battle
-        mcts.apply_action(state, "move 1")
-        assert mock.last_sent["battle"]["sides"] == battle["sides"]
-
-
-# ---------------------------------------------------------------------------
-# play_game
-# ---------------------------------------------------------------------------
-
-class TestPlayGame:
-    def test_p1_wins(self):
-        mock = MockIPC([ACTIVE_RESPONSE, TERMINAL_P1_WIN])
-        mcts = DummyMCTS(mock)
-        result = play_game(mock, "team1", "team2", mcts, mcts_iterations=0)
-        assert result.winner == "p1"
-
-    def test_p2_wins(self):
-        mock = MockIPC([ACTIVE_RESPONSE, TERMINAL_P2_WIN])
-        mcts = DummyMCTS(mock)
-        result = play_game(mock, "team1", "team2", mcts, mcts_iterations=0)
-        assert result.winner == "p2"
-
-    def test_turn_count_one_turn(self):
-        mock = MockIPC([ACTIVE_RESPONSE, TERMINAL_P1_WIN])
-        mcts = DummyMCTS(mock)
-        result = play_game(mock, "team1", "team2", mcts, mcts_iterations=0)
-        assert result.turns == 1
-
-    def test_turn_count_two_turns(self):
-        mock = MockIPC([ACTIVE_RESPONSE, ACTIVE_RESPONSE, TERMINAL_P1_WIN])
-        mcts = DummyMCTS(mock)
-        result = play_game(mock, "team1", "team2", mcts, mcts_iterations=0)
-        assert result.turns == 2
-
-    def test_immediate_terminal(self):
-        """Battle is already over at start (e.g. forfeit)."""
-        mock = MockIPC([TERMINAL_P2_WIN])
-        mcts = DummyMCTS(mock)
-        result = play_game(mock, "team1", "team2", mcts, mcts_iterations=0)
-        assert result.winner == "p2"
-        assert result.turns == 0
-
-    def test_battle_start_sends_correct_payload(self):
-        mock = MockIPC([TERMINAL_P1_WIN])
-        mcts = DummyMCTS(mock)
-        play_game(mock, "player_team_str", "opp_team_str", mcts, mcts_iterations=0)
-        first_sent = mock.all_sent[0]
-        assert first_sent.get("new") is True
-        assert first_sent["team1"] == "player_team_str"
-        assert first_sent["team2"] == "opp_team_str"
-
-    def test_result_is_battle_result_dataclass(self):
-        mock = MockIPC([TERMINAL_P1_WIN])
-        mcts = DummyMCTS(mock)
-        result = play_game(mock, "t1", "t2", mcts, mcts_iterations=0)
-        assert isinstance(result, BattleResult)
-        assert hasattr(result, "winner")
-        assert hasattr(result, "turns")

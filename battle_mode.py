@@ -1,8 +1,8 @@
 """
 battle_mode.py
 
-F5 battle mode: reads live team state from GBA memory, runs MCTS to pick the
-best move, and injects the corresponding button sequence into the emulator.
+Live battle mode: reads team state from GBA memory, runs shallow search to
+pick the best move, and injects the corresponding button sequence into the emulator.
 """
 
 import json
@@ -35,7 +35,7 @@ from emerald_reader import (
 )
 from config import APPROVED_OPPONENT_ITEMS
 from NodeIPC import NodeIPC
-from battle_sim import PokemonMCTS, parse_ipc_response, _rand_battle, select_move_with_ai_flags, get_p2_move_candidates
+from battle_sim import parse_ipc_response, _rand_battle, select_move_with_ai_flags, _pick_opponent_action
 from battle_record import BattleRecord
 from battle_text_validator import parse_battle_texts, validate, MemoryState
 from gen3_charset import read_battle_text
@@ -466,8 +466,7 @@ def _simulate_and_reconcile(ipc, ps_state: dict, p1_action: str, p2_action: str,
             p2_sw = _opp_ps_switch_from_slot(opp_active_gba_slot, p2_gba_order)
             if p2_sw is None:
                 print('[battle_loop] Warning: cannot map opp slot to PS switch — using ai_flags')
-                _tmp = PokemonMCTS(ipc, node_script_path=None)
-                p2_sw = _tmp._pick_p2_move(new_state) or new_state['p2_switches'][0]
+                p2_sw = _pick_opponent_action(new_state) or new_state['p2_switches'][0]
             _apply_gba_switch(p2_gba_order, opp_active_gba_slot)
             resp      = ipc.send({'battle': _rand_battle(new_state['battle']), 'p2': p2_sw})
             new_state = parse_ipc_response(resp)
@@ -498,7 +497,7 @@ _FAINT_SCREEN_STABLE = 10   # consecutive frames battler_fainted & 1 required be
 _REFRESH_AFTER       = 5    # reconcile attempts before re-checking GBA active index
 _TEXT_STABLE_FRAMES  = 4    # consecutive stable frames before recording a battle text string
 
-from search_process import MCTSProcess, ShallowSearchProcess
+from search_process import ShallowSearchProcess
 
 
 def _resolve_move_name(action: str, state: dict, side_idx: int) -> str | None:
@@ -525,18 +524,16 @@ class BattleResources(NamedTuple):
     emu_lock:         object
     node_script_path: str
     ipc:              object
-    mcts_proc:        object
     species_db:       dict
     moves_db:         dict
     items_db:         dict
     abilities_db:     dict
     opp_last_move_id: object        # mutable [int] or None; shared with emu_loop
     badge_boosts:     dict | None
-    mcts_iterations:  int
     test_actions:     list | None
     recorder:         object
     val_log:          object
-    decision_fn:      object        # callable(ipc, state)->str, or None to use MCTS
+    decision_fn:      object        # callable(ipc, state)->str
 
 
 @dataclass
@@ -597,171 +594,37 @@ def _build_p2_action(res: BattleResources, state: BattleLoopState,
         action = _find_opp_ps_action(opp_move_id, state.ps_state, res.moves_db)
         if action:
             return action
-        tmp = PokemonMCTS(res.ipc, node_script_path=res.node_script_path)
-        action = tmp._pick_p2_move(state.ps_state) or 'move 1'
+        action = _pick_opponent_action(state.ps_state) or 'move 1'
         if log:
             print(f'[battle_loop] Opp move not in PS slots; ai_flags fallback: {action}')
         return action
-    tmp = PokemonMCTS(res.ipc, node_script_path=res.node_script_path)
-    action = tmp._pick_p2_move(state.ps_state) or 'move 1'
+    action = _pick_opponent_action(state.ps_state) or 'move 1'
     if log:
         print(f'[battle_loop] No opp action detected; ai_flags fallback: {action}')
     return action
 
 
-def _merge_weighted_stats(stats_and_weights: list) -> list:
-    """Weighted-average a list of (stats, weight) pairs into a single stats list.
-
-    Each stats entry is a list of {'action': str, 'avg': float, 'visits': int}.
-    Returns a merged list with the weighted-average avg per action.
-    """
-    totals: dict = {}
-    for stats, weight in stats_and_weights:
-        for s in stats:
-            a = s['action']
-            if a not in totals:
-                totals[a] = [0.0, 0.0, 0]   # weighted_avg_sum, weight_sum, total_visits
-            totals[a][0] += weight * s['avg']
-            totals[a][1] += weight
-            totals[a][2] += s.get('visits', 0)
-    return [{'action': a, 'avg': ws / tw, 'visits': v}
-            for a, (ws, tw, v) in totals.items() if tw > 0]
+def _run_decision_fn(res: BattleResources, state: BattleLoopState,
+                     known_p2: str | None, label: str = 'decision_fn') -> str | None:
+    """Call decision_fn with timing and print. Shared by normal and faint-switch paths."""
+    state.ps_state["known_p2"] = known_p2
+    _t0 = time.monotonic()
+    action = res.decision_fn(res.ipc, state.ps_state)
+    print(f'[battle_loop] {label} chose {action!r} in {time.monotonic() - _t0:.2f}s')
+    return action
 
 
 def _select_best_action(res: BattleResources, state: BattleLoopState,
                         known_p2: str | None) -> tuple:
-    """Run MCTS or pull from test_actions. Returns (best_action, mcts_stats).
-
-    When known_p2 is set, runs a single search with the forced opponent action.
-    Otherwise enumerates all possible opponent moves (with their probabilities),
-    runs one MCTS search per candidate, and returns a weighted-average of stats.
-    """
+    """Run decision_fn or pull from test_actions. Returns (best_action, [])."""
     if res.test_actions:
         action = res.test_actions[state.test_action_idx % len(res.test_actions)]
         state.test_action_idx += 1
         print(f'[battle_loop] Test action [{state.test_action_idx - 1}]: {action}')
         return action, []
 
-    if res.decision_fn is not None:
-        _t0 = time.monotonic()
-        state.ps_state["known_p2"] = known_p2
-        action = res.decision_fn(res.ipc, state.ps_state)
-        print(f'[battle_loop] decision_fn chose {action!r} in {time.monotonic() - _t0:.2f}s')
-        return action, []
-
-    p1sw  = state.last_p1_action is not None and state.last_p1_action.startswith('switch')
-    oppsw = ((state.last_p2_action is not None and state.last_p2_action.startswith('switch'))
-             or state.opp_faint_switched)
-
-    if known_p2:
-        mcts_state = {**state.ps_state, '_p2_forced': known_p2,
-                      '_p1_switched_last': p1sw, '_opp_switched_last': oppsw}
-        _t0 = time.monotonic()
-        best, stats = res.mcts_proc.search(mcts_state, res.mcts_iterations)
-        print(f'[battle_loop] MCTS decision time: {time.monotonic() - _t0:.2f}s')
-        if stats:
-            print('[battle_loop] MCTS action stats:')
-            for s in sorted(stats, key=lambda s: s["avg"], reverse=True):
-                print(f'  {s["action"]:20s}  visits={s["visits"]:4d}  avg={s["avg"]:.3f}')
-        return best, stats
-
-    p2_avail = state.ps_state.get('p2_moves') or []
-    candidates = get_p2_move_candidates(state.ps_state, p2_avail, log=bool(p2_avail)) if p2_avail else [(None, 1.0)]
-    switch_flags = {'_p1_switched_last': p1sw, '_opp_switched_last': oppsw}
-    if len(candidates) > 1:
-        print(f'[battle_loop] p2 candidates: ' +
-              ', '.join(f'{a}({w:.2f})' for a, w in candidates))
-
-    _t0 = time.monotonic()
-    stats_and_weights = []
-    for p2_action, weight in candidates:
-        mcts_state = {**state.ps_state, **switch_flags,
-                      **({'_p2_forced': p2_action} if p2_action else {})}
-        _, s = res.mcts_proc.search(mcts_state, res.mcts_iterations)
-        stats_and_weights.append((s, weight))
-
-    merged = _merge_weighted_stats(stats_and_weights)
-    print(f'[battle_loop] MCTS decision time: {time.monotonic() - _t0:.2f}s')
-
-    if merged:
-        best = max(merged, key=lambda s: s['avg'])['action']
-        print('[battle_loop] MCTS action stats:')
-        for s in sorted(merged, key=lambda s: s["avg"], reverse=True):
-            print(f'  {s["action"]:20s}  visits={s["visits"]:4d}  avg={s["avg"]:.3f}')
-    else:
-        best = None
-
-    return best, merged
-
-
-def _apply_bad_rng_penalty(res: BattleResources, state: BattleLoopState,
-                           best_action: str | None, mcts_stats: list) -> tuple:
-    """Apply a weighted bad-RNG penalty for actions where worst-case RNG kills the active Pokémon.
-
-    For each p1 action, simulates all possible p2 moves (with their weights) under
-    forceBadRNG. The penalty is −5 × death_weight, where death_weight is the
-    probability-weighted fraction of p2 outcomes that kill the active Pokémon.
-    Returns (new_best_action, penalties_dict).
-    """
-    penalties: dict = {}
-    all_p1 = list(state.ps_state.get('p1_moves') or []) + list(state.ps_state.get('p1_switches') or [])
-    if not all_p1:
-        return best_action, penalties
-
-    p2_moves_avail   = state.ps_state.get('p2_moves') or []
-    p2_switches_avail = state.ps_state.get('p2_switches') or []
-    if p2_moves_avail:
-        candidates = get_p2_move_candidates(state.ps_state, p2_moves_avail)
-    elif p2_switches_avail:
-        candidates = [(p2_switches_avail[0], 1.0)]
-    else:
-        candidates = [(None, 1.0)]
-
-    for p1_act in all_p1:
-        death_weight = 0.0
-        for p2_act, weight in candidates:
-            payload = {'battle': state.ps_state['battle'], 'p1': p1_act, 'P1BadRNG': True, "P2GoodRNG": True}
-            if p2_act:
-                payload['p2'] = p2_act
-            bad   = parse_ipc_response(res.ipc.send(payload))
-            sides = bad['battle'].get('sides', [])
-            hp    = sides[0]['pokemon'][0].get('hp', 1) if sides else 1
-            if hp <= 0:
-                death_weight += weight
-        if death_weight > 0:
-            penalty = -5.0 * death_weight
-            penalties[p1_act] = penalty
-            print(f'[battle_loop] Bad-RNG penalty {penalty:.2f}: {p1_act} '
-                  f'(death weight={death_weight:.2f})')
-
-    if penalties and mcts_stats:
-        adj      = {s['action']: s['avg'] + penalties.get(s['action'], 0.0) for s in mcts_stats}
-        new_best = max(adj, key=adj.get)
-        if new_best != best_action:
-            print(f'[battle_loop] Bad-RNG re-select: {best_action} → {new_best}')
-        return new_best, penalties
-    return best_action, penalties
-
-
-def _apply_ai_flag_override(state: BattleLoopState, best_action: str | None,
-                            mcts_stats: list, penalties: dict) -> str | None:
-    """Override best_action with ai_flags suggestion if within 90% of top adjusted score."""
-    if not mcts_stats or not state.ps_state.get('p1_moves'):
-        return best_action
-    scores   = {s['action']: s['avg'] + penalties.get(s['action'], 0.0) for s in mcts_stats}
-    ai_action = select_move_with_ai_flags(state.ps_state, state.ps_state['p1_moves'], player=1)
-    print(f'[battle_loop] AI-flag suggestion: {ai_action}')
-    ai_avg = scores.get(ai_action)
-    if ai_avg is None or ai_action == best_action:
-        return best_action
-    min_avg  = min(scores.values())
-    top_norm = max(scores.values()) - min_avg
-    ai_norm  = ai_avg - min_avg
-    """if ai_norm >= 0.9 * top_norm:
-        print(f'[battle_loop] AI-flag override: {best_action} → {ai_action} '
-              f'(ai_norm={ai_norm:.3f}, top_norm={top_norm:.3f})')
-        return ai_action"""
-    return best_action
+    action = _run_decision_fn(res, state, known_p2)
+    return action, []
 
 
 def _inject_action_keys(injected_keys, best_action: str, is_forced_switch: bool) -> None:
@@ -957,21 +820,17 @@ def _reconcile_turn(res: BattleResources, state: BattleLoopState,
 
 
 def _select_faint_switch(res: BattleResources, state: BattleLoopState) -> str:
-    """Pick the best forced switch-in via MCTS or test actions."""
+    """Pick the best forced switch-in via decision_fn or test actions."""
     available = state.ps_state.get('p1_switches') or []
     if res.test_actions:
         result = res.test_actions[state.test_action_idx % len(res.test_actions)]
         state.test_action_idx += 1
         print(f'[battle_loop] Faint-screen test action: {result}')
     else:
-        _t0 = time.monotonic()
-        result, _ = res.mcts_proc.search(state.ps_state, res.mcts_iterations)
-        print(f'[battle_loop] MCTS faint-switch decision time: {time.monotonic() - _t0:.2f}s')
+        result = _run_decision_fn(res, state, known_p2=None, label='Faint-switch')
     if result is None or not result.startswith('switch '):
         result = available[0]
         print(f'[battle_loop] Faint-screen: invalid action — defaulting to {result}')
-    elif not res.test_actions:
-        print(f'[battle_loop] Faint-screen MCTS chose: {result}')
     return result
 
 
@@ -1020,19 +879,17 @@ def _faint_mini_reconcile(res: BattleResources, state: BattleLoopState,
 def _select_and_inject_action(res: BattleResources, state: BattleLoopState,
                               injected_keys, is_forced_switch: bool,
                               opp_item_this_turn: int) -> bool:
-    """Select best action via MCTS + penalties + AI-flag; inject keys. Returns False if no action."""
+    """Select best action via decision_fn; inject keys. Returns False if no action."""
     known_p2 = (f'item {TRAINER_BATTLE_ITEM_PS_IDS[opp_item_this_turn]}'
                 if opp_item_this_turn else None)
     if known_p2:
-        print(f'[battle_loop] Opponent will use {known_p2} this turn — injecting into MCTS')
-    best_action, mcts_stats = _select_best_action(res, state, known_p2)
-    #best_action, penalties  = _apply_bad_rng_penalty(res, state, best_action, mcts_stats)
-    #best_action = _apply_ai_flag_override(state, best_action, mcts_stats, penalties)
+        print(f'[battle_loop] Opponent will use {known_p2} this turn')
+    best_action, _stats = _select_best_action(res, state, known_p2)
     if best_action is None:
-        print('[battle_loop] Warning: MCTS returned no action')
+        print('[battle_loop] Warning: search returned no action')
         return False
     if res.recorder:
-        res.recorder.on_mcts_decision(state.turn_number, best_action, mcts_stats)
+        res.recorder.on_mcts_decision(state.turn_number, best_action, _stats)
     state.last_p1_action = best_action
     _inject_action_keys(injected_keys, best_action, is_forced_switch)
     return True
@@ -1184,7 +1041,6 @@ def _run_loop(res: BattleResources, state: BattleLoopState, injected_keys) -> No
 def run_battle_loop(core, emu_lock, node_script_path, injected_keys,
                     opp_last_move_id=None,
                     badge_boosts: dict | None = None,
-                    mcts_iterations: int = 1000, num_workers: int = 15,
                     shallow_workers: int = 30,
                     test_actions: list | None = None,
                     recorder: 'BattleRecord | None' = None,
@@ -1193,9 +1049,9 @@ def run_battle_loop(core, emu_lock, node_script_path, injected_keys,
 
     Polls gBattleCommunication[0] at ~30 Hz.  When not at the battle menu, injects
     periodic A presses to advance turn text.  When the menu is first detected each turn,
-    runs MCTS and injects the best action.  After each subsequent menu appearance,
+    runs shallow search and injects the best action.  After each subsequent menu appearance,
     simulates the previous turn in PS using the actual opponent move and reconciles
-    HP/PP/status with GBA ground truth before running MCTS for the new turn.
+    HP/PP/status with GBA ground truth before running search for the new turn.
     """
     from datetime import datetime
     species_db   = _load_db('gen3_species.json')
@@ -1203,7 +1059,6 @@ def run_battle_loop(core, emu_lock, node_script_path, injected_keys,
     items_db     = _load_db('gen3_items.json')
     abilities_db = _load_db('gen3_abilities.json')
     ipc          = NodeIPC(node_script_path)
-    mcts_proc    = MCTSProcess(node_script_path, num_workers=num_workers)
     shallow_proc = ShallowSearchProcess(node_script_path, num_workers=shallow_workers)
     if decision_fn is None:
         decision_fn = lambda _ipc, state: shallow_proc.search(state)
@@ -1213,134 +1068,18 @@ def run_battle_loop(core, emu_lock, node_script_path, injected_keys,
     val_log      = open(val_log_path, 'w', buffering=1)
     res = BattleResources(
         core=core, emu_lock=emu_lock, node_script_path=node_script_path,
-        ipc=ipc, mcts_proc=mcts_proc,
+        ipc=ipc,
         species_db=species_db, moves_db=moves_db, items_db=items_db, abilities_db=abilities_db,
         opp_last_move_id=opp_last_move_id, badge_boosts=badge_boosts,
-        mcts_iterations=mcts_iterations, test_actions=test_actions,
+        test_actions=test_actions,
         recorder=recorder, val_log=val_log, decision_fn=decision_fn,
     )
     try:
         _run_loop(res, BattleLoopState(), injected_keys)
     finally:
         shallow_proc.close()
-        mcts_proc.close()
         ipc.close()
         val_log.close()
         print('[battle_loop] IPC closed.')
 
 
-# ─── Single-turn entry point (legacy) ────────────────────────────────────────
-
-def suggest_and_queue_move(core, emu_lock, node_script_path, injected_keys,
-                           opp_last_move_id=None,
-                           mcts_iterations=100, num_workers=5):
-    """Read live GBA state, run MCTS, and queue button presses for the best move.
-
-    Args:
-        core: mgba core object.
-        emu_lock: threading.Lock guarding GBA memory access.
-        node_script_path: Path to Connection.js.
-        injected_keys: collections.deque of (bitmask, frames_remaining) tuples.
-        opp_last_move_id: mutable [int] container updated by emu_loop with the last
-            non-zero gLastMoves[1] seen during turn resolution.
-        mcts_iterations: MCTS search budget.
-        num_workers: Number of parallel MCTS worker threads.
-    """
-    species_db   = _load_db('gen3_species.json')
-    moves_db     = _load_db('gen3_move_names.json')
-    items_db     = _load_db('gen3_items.json')
-    abilities_db = _load_db('gen3_abilities.json')
-
-    with emu_lock:
-        player_team   = read_player_team(core)
-        enemy_team    = read_enemy_team(core)
-        opp_party_idx = read_opp_party_idx(core)
-
-    global _prev_opp_party_idx
-
-    # Report opponent's last move (captured during turn resolution by emu_loop)
-    opp_last_id   = opp_last_move_id[0] if opp_last_move_id else 0
-    opp_last_name = moves_db.get(str(opp_last_id), f"id#{opp_last_id:#06x}") if opp_last_id else "(none yet)"
-    print(f"[battle_mode] Opponent's last move: {opp_last_name}")
-
-    # Detect opponent switch since last F5 press
-    if _prev_opp_party_idx is not None and opp_party_idx != _prev_opp_party_idx:
-        switched_name = (
-            internal_species_name(enemy_team[opp_party_idx]['species'], species_db)
-            if opp_party_idx < len(enemy_team) else f"slot {opp_party_idx}"
-        )
-        print(f"[battle_mode] Opponent switched to party slot {opp_party_idx + 1}: {switched_name}")
-    _prev_opp_party_idx = opp_party_idx
-
-    if not player_team or not enemy_team:
-        print("[battle_mode] Warning: empty team — not in battle?")
-        return
-
-    # Reorder so active Pokemon leads
-    p1_active = _active_index(player_team)
-    p2_active = _active_index(enemy_team)
-
-    p1_ordered = [player_team[p1_active]] + [p for i, p in enumerate(player_team) if i != p1_active]
-    p2_ordered = [enemy_team[p2_active]]  + [p for i, p in enumerate(enemy_team)  if i != p2_active]
-
-    p1_gba_indices  = [p1_active] + [i for i in range(len(player_team)) if i != p1_active]
-    is_forced_switch = bool(player_team) and player_team[0].get('current_hp', 1) == 0
-
-    _print_team("Player team",   p1_ordered, species_db, moves_db)
-    _print_team("Opponent team", p2_ordered, species_db, moves_db)
-
-    p1_pipes = _gba_team_to_pipe_strings(p1_ordered, species_db, moves_db, items_db, abilities_db)
-    p2_pipes = _gba_team_to_pipe_strings(p2_ordered, species_db, moves_db, items_db, abilities_db)
-    p1_init  = _build_init_state(p1_ordered)
-    p2_init  = _build_init_state(p2_ordered)
-
-    team1_str = ']'.join(p1_pipes)
-    team2_str = ']'.join(p2_pipes)
-
-    ipc = NodeIPC(node_script_path)
-    try:
-        response = ipc.send({
-            'new':        True,
-            'team1':      team1_str,
-            'team2':      team2_str,
-            'p1InitState': p1_init,
-            'p2InitState': p2_init,
-        })
-        state = parse_ipc_response(response)
-
-        mcts = PokemonMCTS(
-            ipc,
-            node_script_path=node_script_path,
-            num_workers=num_workers,
-        )
-        best_action, root = mcts.search(state, mcts_iterations)
-
-        # Print action stats sorted by score
-        if root.children:
-            sorted_children = sorted(root.children, key=lambda c: c.value / c.visits if c.visits > 0 else 0.0, reverse=True)
-            print("[battle_mode] MCTS action stats:")
-            for c in sorted_children:
-                avg = c.value / c.visits if c.visits > 0 else 0.0
-                print(f"  {c.action:20s}  visits={c.visits:4d}  avg={avg:.3f}")
-
-        if best_action is None:
-            print("[battle_mode] Warning: MCTS returned no action")
-            return
-
-        if best_action.startswith('move '):
-            move_index = int(best_action.split()[1]) - 1
-            print(f"[battle_mode] Queuing: {best_action} (slot index {move_index})")
-            injected_keys.extend(_move_button_sequence(move_index))
-
-        elif best_action.startswith('switch '):
-            ps_slot = int(best_action.split()[1])          # 1-based PS ordering
-            gba_idx = p1_gba_indices[ps_slot - 1]          # 0-based GBA party slot
-            print(f"[battle_mode] Queuing: {best_action} "
-                  f"(GBA slot {gba_idx}, forced={is_forced_switch})")
-            injected_keys.extend(_switch_button_sequence(gba_idx, not is_forced_switch))
-
-        else:
-            print(f"[battle_mode] Best action '{best_action}' is unrecognized — skipping injection")
-
-    finally:
-        ipc.close()

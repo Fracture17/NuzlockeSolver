@@ -13,7 +13,7 @@ For each level multiplier (0.6, 0.7, 0.8, 0.9, 1.0):
 
 Output directories:
   matchup/    — pickled MatchupInfo objects
-  raw_data/   — JSON battle records from play_game(record_path=...)
+  raw_data/   — JSON battle records (requires redesign for shallow search)
   analysis/   — txt analysis reports from battle_analysis
 
 File naming:
@@ -27,10 +27,10 @@ import os
 import pickle
 
 from MatchupInfo import MatchupInfo, get_teams_at_level
-from NodeIPC import NodeIPC
+
 from battle_analysis import format_battle_report
 from battle_sim import (
-    PokemonMCTS, play_game, assemble_team_string,
+    assemble_team_string,
     assemble_opponent_string, reorder_team,
 )
 from test2 import build_scores
@@ -89,34 +89,20 @@ def select_teams(m) -> tuple:
 # ---------------------------------------------------------------------------
 
 def _run_sim_job(job: dict) -> None:
-    """Run one recorded battle and write the analysis report."""
+    """Run one recorded battle and write the analysis report.
+
+    NOTE: Battle simulation via play_game has been removed (MCTS removed).
+    This function now only processes pre-existing JSON battle records.
+    """
     json_path = job["json_path"]
     analysis_path = job["analysis_path"]
-    node_script = job["node_script"]
-    player_str = job["player_str"]
-    opp_str = job["opp_str"]
-    iters = job["iters"]
-    depth = job["depth"]
-    num_workers = job["num_workers"]
 
-    if os.path.exists(json_path):
-        # Load existing JSON for analysis only
-        with open(json_path, encoding="utf-8") as f:
-            data = json.load(f)
-    else:
-        # Run the battle
-        ipc = NodeIPC(node_script)
-        try:
-            mcts = PokemonMCTS(ipc, simulation_depth_limit=depth,
-                               node_script_path=node_script, num_workers=num_workers)
-            # record_path without .json extension — play_game appends it
-            record_path = json_path[:-5] if json_path.endswith(".json") else json_path
-            play_game(ipc, player_str, opp_str, mcts, iters, record_path=record_path)
-        finally:
-            ipc.close()
+    if not os.path.exists(json_path):
+        print(f"[run_analysis] Skipping {json_path} — battle simulation requires redesign for shallow search")
+        return
 
-        with open(json_path, encoding="utf-8") as f:
-            data = json.load(f)
+    with open(json_path, encoding="utf-8") as f:
+        data = json.load(f)
 
     # Write analysis report
     if not os.path.exists(analysis_path):

@@ -46,7 +46,7 @@ VARIANCE_ANALYSIS = False
 def _score_state(state: dict) -> float:
     """Score a battle state from p1's perspective.
 
-    Mirrors PokemonMCTS.get_reward(state, player=1) exactly.
+    Scores battle state from p1's perspective (HP%, faint counts, boosts).
     """
     sides = state["battle"].get("sides", [])
     if len(sides) < 2:
@@ -182,7 +182,7 @@ def _get_opp_weights(state: dict) -> list[tuple[Optional[str], float]]:
 
     If _p2_forced is set in the state (e.g. the opponent is known to use a battle
     item this turn), that action is returned with probability 1.0, matching the
-    behaviour of PokemonMCTS.apply_action which checks the same key.
+    behaviour of simulate_turn which checks the same key.
 
     Raises RuntimeError if no opponent actions are available (shouldn't happen
     in a live battle before the battle is over unless the player is in a forced switch).

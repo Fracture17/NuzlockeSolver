@@ -36,8 +36,7 @@ _HERE          = os.path.dirname(os.path.abspath(__file__))
 _SAVESTATE_DIR = os.path.join(_HERE, 'savestates')
 _LOG_DIR       = os.path.join(_HERE, 'test_logs')
 
-MCTS_ITERATIONS = 1000
-NUM_WORKERS     = 15
+SHALLOW_WORKERS = 30
 
 _STUCK_TIMEOUT  = 30.0   # seconds of no output before declaring stuck
 _MAX_MISMATCHES = 10     # faint mismatch prints before declaring stuck (100 attempts each = 1000 total)
@@ -80,14 +79,13 @@ def run_battle_test(savestate_name: str, config: dict | None = None) -> BattleRe
 
     Args:
         savestate_name: Base name of the savestate file (without .state extension).
-        config: Optional overrides: mcts_iterations, num_workers, test_actions.
+        config: Optional overrides: shallow_workers, test_actions.
 
     Returns:
         Completed BattleRecord with assertions run and logs saved.
     """
     cfg             = config or {}
-    mcts_iterations = cfg.get('mcts_iterations', MCTS_ITERATIONS)
-    num_workers     = cfg.get('num_workers', NUM_WORKERS)
+    shallow_workers = cfg.get('shallow_workers', SHALLOW_WORKERS)
     test_actions    = cfg.get('test_actions', None)
 
     savestate_path = os.path.join(_SAVESTATE_DIR, f'{savestate_name}.state')
@@ -131,8 +129,7 @@ def run_battle_test(savestate_name: str, config: dict | None = None) -> BattleRe
                 'spdBoost': BADGE_BOOST_SP,
                 'speBoost': BADGE_BOOST_SPE,
             },
-            mcts_iterations=mcts_iterations,
-            num_workers=num_workers,
+            shallow_workers=shallow_workers,
             test_actions=test_actions,
             recorder=record,
         ),
