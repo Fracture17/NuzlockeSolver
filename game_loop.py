@@ -37,6 +37,10 @@ from emerald_reader import (
     SPECIES_JSON,
     MOVES_JSON,
     LAST_MOVES_ADDR,
+    BASE_STATS_ROM,
+    BASE_STATS_SIZE,
+    EXP_GROUP_OFF,
+    _min_exp_for_level,
     _read_bytes,
     decrypt_pokemon,
     internal_species_name,
@@ -59,7 +63,7 @@ import battle_mode
 ROM_PATH    = "/home/Fracture/Downloads/emerald.gba"   # dummy
 SAVE_FILE   = "/home/Fracture/Downloads/emerald.sav"   # dummy — battery save (.sav)
 NODE_SCRIPT = "/home/Fracture/WebstormProjects/pokemon-showdown-master/Connection.js"
-SCALE     = 3                                # 240×160 → 720×480
+SCALE     = 6                                # 240×160 → 720×480
 SCAN_INTERVAL = 3.0                          # seconds between RAM scans
 
 _HERE             = os.path.dirname(os.path.abspath(__file__))
@@ -69,14 +73,13 @@ _SAVESTATE_FILETYPES = [('Save states', '*.state'), ('All files', '*.*')]
 
 SCAN_ADDR = 0x02024744   # gEnemyParty
 MAX_VALID_SPECIES = 440   # species IDs above this after decryption are garbage
-LEVEL_CAP = 24            # Party Pokémon are capped to this level every frame
+LEVEL_CAP = 58            # Party Pokémon are capped to this level every frame
 
 # ─── Testing mode — bypass MCTS and use a fixed action sequence ───────────────
 TESTING_MODE    = False
 TEST_ACTIONS    = ['move 3']  # cycles if battle exceeds list length
-
 # ─── Badge boosts — set True for each badge earned that boosts stats ──────────
-from config import BADGE_BOOST_ATK, BADGE_BOOST_DEF, BADGE_BOOST_SP, BADGE_BOOST_SPE
+from config import BADGE_BOOST_ATK, BADGE_BOOST_DEF, BADGE_BOOST_SP, BADGE_BOOST_SPE, TRAINER_NAME
 
 # ─── Per-frame script constants ───────────────────────────────────────────────
 _SAVE1_PTR    = 0x03005D8C   # IWRAM pointer to save block 1
@@ -84,46 +87,9 @@ _ITEMS_OFF    = 0x0560        # offset from save block base to items pocket
 _ITEMS_SLOTS  = 30
 _RARE_CANDY   = 68            # item ID 0x44
 
-_BASE_STATS_ROM  = 0x083203CC  # ROM base stats table (Emerald US v1.0)
-_BASE_STATS_SIZE = 28
-_EXP_GROUP_OFF   = 19          # byte offset of expGroup within a base stats entry
 _LEVEL_OFFSET    = 0x54        # unencrypted level byte offset within party struct
 # Growth substructure slot position for each personality % 24
 _G_SLOT = [0, 0, 0, 0, 0, 0, 1, 1, 2, 3, 2, 3, 1, 1, 2, 3, 2, 3, 1, 1, 2, 3, 2, 3]
-
-
-def _min_exp_for_level(group: int, level: int) -> int:
-    """Minimum cumulative EXP for a given level under each Gen 3 growth rate group."""
-    n = level
-    if n <= 0:
-        return 0
-    n2 = n * n
-    n3 = n2 * n
-    if group == 0:   # Medium Fast
-        return n3
-    elif group == 1: # Erratic
-        if n <= 50:
-            return (n3 * (100 - n)) // 50
-        elif n <= 68:
-            return (n3 * (150 - n)) // 100
-        elif n <= 98:
-            return (n3 * ((1911 - 10 * n) // 3)) // 500
-        else:
-            return (n3 * (160 - n)) // 100
-    elif group == 2: # Fluctuating
-        if n <= 15:
-            return (n3 * (((n + 1) // 3) + 24)) // 50
-        elif n <= 35:
-            return (n3 * (n + 14)) // 50
-        else:
-            return (n3 * ((n // 2) + 32)) // 50
-    elif group == 3: # Medium Slow
-        return max(0, (6 * n3 - 75 * n2 + 500 * n - 700) // 5)
-    elif group == 4: # Fast
-        return (4 * n3) // 5
-    elif group == 5: # Slow
-        return (5 * n3) // 4
-    return n3
 
 
 def _recalc_checksum(core, base: int) -> None:
@@ -184,12 +150,13 @@ def _cap_party_levels(core) -> None:
         if int(core.memory.u8[base + _LEVEL_OFFSET]) > LEVEL_CAP:
             core.memory.u8[base + _LEVEL_OFFSET] = LEVEL_CAP
 
-        exp_group = int(core.memory.u8[_BASE_STATS_ROM + species * _BASE_STATS_SIZE + _EXP_GROUP_OFF])
+        exp_group = int(core.memory.u8[BASE_STATS_ROM + species * BASE_STATS_SIZE + EXP_GROUP_OFF])
         max_exp   = _min_exp_for_level(exp_group, LEVEL_CAP)
         exp       = (int(core.memory.u32[g_off + 4]) ^ key) & 0xFFFFFFFF
         if exp > max_exp:
             core.memory.u32[g_off + 4] = (max_exp ^ key) & 0xFFFFFFFF
             _recalc_checksum(core, base)
+
 
 
 # ─── RAM scan helper ──────────────────────────────────────────────────────────
@@ -260,14 +227,17 @@ KEY_MAP = {
 # Adjust button indices to match your controller (use a joystick test tool to find them).
 # Axis 0 = left stick X, Axis 1 = left stick Y (values -1.0 to 1.0).
 JOYSTICK_BUTTON_MAP = {
-    0:  BTN_A,       # typically Cross / A
-    1:  BTN_B,       # typically Circle / B
-    6:  BTN_SELECT,  # typically Share / Back
-    7:  BTN_START,   # typically Options / Start
-    4:  BTN_L,       # L1
-    5:  BTN_R,       # R1
+    1:  BTN_A,
+    0:  BTN_B,
+    4:  BTN_SELECT,
+    6:  BTN_START,
+    9:  BTN_L,
+    10: BTN_R,
 }
-AXIS_DEADZONE = 0.4  # ignore axis values smaller than this
+# Controller speedup buttons (toggle; mutually exclusive)
+JOY_BTN_SPEED_3X        = 13   # 3× speed cap
+JOY_BTN_SPEED_UNLIMITED = 14   # unlimited speed
+AXIS_DEADZONE  = 0.4   # ignore axis values smaller than this
 
 
 def _joystick_bitmask(joystick: pygame.joystick.Joystick) -> int:
@@ -364,14 +334,17 @@ def main():
     # ── Emulation thread ────────────────────────────────────────────────────
     emu_lock         = threading.Lock()
     running          = [True]   # list so the thread closure can read the flag
-    fast_forward     = [False]  # hold TAB to run uncapped
     injected_keys      = collections.deque()  # (bitmask, frames_remaining) pairs
     opp_last_move_id   = [0]  # last non-zero gLastMoves[1]; updated per-frame by emu_loop
-    speed_toggle       = [False]  # F4 toggles permanent fast-forward (TAB still works too)
+    # Speed mode: 0 = normal (60 fps), 1 = 3× (180 fps cap), 2 = unlimited
+    # TAB held forces unlimited temporarily regardless of mode.
+    speed_mode         = [0]    # 0=normal, 1=3×, 2=unlimited (controller/F4 toggle)
+    _tab_held          = [False] # TAB held → temporary unlimited without altering speed_mode
+    _prev_btn13        = [False]
+    _prev_btn14        = [False]
     _battle_loop_active = threading.Event()  # set while run_battle_loop thread is alive
 
     def emu_loop():
-        frame_time = 1.0 / 60.0
         while running[0]:
             t = time.perf_counter()
             with emu_lock:
@@ -384,11 +357,17 @@ def main():
                 if _opp_move:
                     opp_last_move_id[0] = _opp_move
 
-            if not fast_forward[0]:
-                elapsed = time.perf_counter() - t
-                remaining = frame_time - elapsed
-                if remaining > 0:
-                    time.sleep(remaining)
+            mode = 2 if _tab_held[0] else speed_mode[0]
+            if mode == 0:
+                frame_time = 1.0 / 60.0
+            elif mode == 1:
+                frame_time = 1.0 / 180.0
+            else:
+                frame_time = 0.0  # unlimited: no sleep
+            elapsed = time.perf_counter() - t
+            remaining = frame_time - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
 
     # ── pygame setup (before emu thread so SDL is fully init'd first) ──────
     pygame.init()
@@ -417,9 +396,8 @@ def main():
             if event.type == pygame.QUIT:
                 running[0] = False
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_F4:
-                speed_toggle[0] = not speed_toggle[0]
-                state = 'ON' if speed_toggle[0] else 'OFF'
-                print(f'[game_loop] F4 — speed-up toggle {state}')
+                speed_mode[0] = 0 if speed_mode[0] != 0 else 2
+                print(f'[game_loop] F4 — speed mode {speed_mode[0]}')
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_s and (event.mod & pygame.KMOD_CTRL):
                 _savestate_save(core, emu_lock)
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_l and (event.mod & pygame.KMOD_CTRL):
@@ -449,6 +427,7 @@ def main():
                                     'speBoost': BADGE_BOOST_SPE,
                                 },
                                 test_actions=TEST_ACTIONS if TESTING_MODE else None,
+                                trainer_name=TRAINER_NAME,
                             )
                         finally:
                             _battle_loop_active.clear()
@@ -457,7 +436,7 @@ def main():
                 print("[game_loop] F2 pressed — reading opponent team...")
                 with emu_lock:
                     team = read_enemy_team(core)
-                log_team(team)
+                log_team(team, trainer_name=TRAINER_NAME)
                 if team:
                     print(f"[game_loop] Logged {len(team)} opponent Pokémon to file.")
                 else:
@@ -466,6 +445,11 @@ def main():
                 with emu_lock:
                     player_team = read_player_team(core)
                     boxes = read_player_box(core)
+                for p in player_team:
+                    p['level'] = LEVEL_CAP
+                for slot in boxes:
+                    for p in slot:
+                        p['level'] = LEVEL_CAP
                 log_player_pokemon(player_team, boxes)
 
         # Build GBA input bitmask
@@ -475,8 +459,22 @@ def main():
                 gba_keys |= bit
         if joystick is not None:
             gba_keys |= _joystick_bitmask(joystick)
+            n = joystick.get_numbuttons()
 
-        fast_forward[0] = bool(keys_held[pygame.K_TAB]) or speed_toggle[0]
+            btn13 = n > JOY_BTN_SPEED_3X        and joystick.get_button(JOY_BTN_SPEED_3X)
+            btn14 = n > JOY_BTN_SPEED_UNLIMITED  and joystick.get_button(JOY_BTN_SPEED_UNLIMITED)
+
+            if btn13 and not _prev_btn13[0]:
+                speed_mode[0] = 0 if speed_mode[0] == 1 else 1
+                print(f'[game_loop] Speed mode: {speed_mode[0]} (3× toggle)')
+            elif btn14 and not _prev_btn14[0]:
+                speed_mode[0] = 0 if speed_mode[0] == 2 else 2
+                print(f'[game_loop] Speed mode: {speed_mode[0]} (unlimited toggle)')
+
+            _prev_btn13[0] = btn13
+            _prev_btn14[0] = btn14
+
+        _tab_held[0] = bool(keys_held[pygame.K_TAB])
 
         # Inject queued keys if available, otherwise use physical input
         if injected_keys:

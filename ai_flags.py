@@ -77,6 +77,15 @@ class MoveEffect(Enum):
     ACC_UP  = auto()
     EVA_UP  = auto()
 
+    # Double-stage single-stat boosts (e.g. Swords Dance, Agility)
+    ATK_UP_2 = auto()
+    DEF_UP_2 = auto()
+    SPA_UP_2 = auto()
+    SPD_UP_2 = auto()
+    SPE_UP_2 = auto()
+    ACC_UP_2 = auto()
+    EVA_UP_2 = auto()
+
     # Multi-stat boosts
     BULK_UP      = auto()
     CALM_MIND    = auto()
@@ -93,8 +102,22 @@ class MoveEffect(Enum):
     ACC_DOWN  = auto()
     EVA_DOWN  = auto()
 
+    # Double-stage single-stat drops (e.g. Screech, Cotton Spore)
+    ATK_DOWN_2 = auto()
+    DEF_DOWN_2 = auto()
+    SPA_DOWN_2 = auto()
+    SPD_DOWN_2 = auto()
+    SPE_DOWN_2 = auto()
+    ACC_DOWN_2 = auto()
+    EVA_DOWN_2 = auto()
+
     # Multi-stat drops
     TICKLE = auto()
+
+    # Standalone volatile/type-change effects
+    MINIMIZE     = auto()
+    DEFENSE_CURL = auto()
+    CAMOUFLAGE   = auto()
 
     # Screens / field
     REFLECT      = auto()
@@ -251,7 +274,9 @@ DISCOURAGED_EFFECTS: frozenset = frozenset({
 })
 
 # Moves that set up on the first turn of battle (Flag 3)
+# Source: AI_SetupFirstTurn_SetupEffectsToEncourage in pokeemerald data/battle_ai_scripts.s
 SETUP_FIRST_TURN_EFFECTS: frozenset = frozenset({
+    # Single-stage stat boosts
     MoveEffect.ATK_UP,
     MoveEffect.DEF_UP,
     MoveEffect.SPA_UP,
@@ -259,43 +284,85 @@ SETUP_FIRST_TURN_EFFECTS: frozenset = frozenset({
     MoveEffect.SPE_UP,
     MoveEffect.ACC_UP,
     MoveEffect.EVA_UP,
+    # Double-stage stat boosts
+    MoveEffect.ATK_UP_2,
+    MoveEffect.DEF_UP_2,
+    MoveEffect.SPA_UP_2,
+    MoveEffect.SPD_UP_2,
+    MoveEffect.SPE_UP_2,
+    MoveEffect.ACC_UP_2,
+    MoveEffect.EVA_UP_2,
+    # Single-stage stat drops (on opponent)
+    MoveEffect.ATK_DOWN,
+    MoveEffect.DEF_DOWN,
+    MoveEffect.SPA_DOWN,
+    MoveEffect.SPD_DOWN,
+    MoveEffect.SPE_DOWN,
+    MoveEffect.ACC_DOWN,
+    MoveEffect.EVA_DOWN,
+    # Double-stage stat drops (on opponent)
+    MoveEffect.ATK_DOWN_2,
+    MoveEffect.DEF_DOWN_2,
+    MoveEffect.SPA_DOWN_2,
+    MoveEffect.SPD_DOWN_2,
+    MoveEffect.SPE_DOWN_2,
+    MoveEffect.ACC_DOWN_2,
+    MoveEffect.EVA_DOWN_2,
+    # Multi-stat
     MoveEffect.BULK_UP,
     MoveEffect.CALM_MIND,
     MoveEffect.COSMIC_POWER,
-    MoveEffect.DRAGON_DANCE,
     MoveEffect.CURSE,
+    MoveEffect.TICKLE,
+    # Screens / field
+    MoveEffect.REFLECT,
+    MoveEffect.LIGHT_SCREEN,
+    # Status infliction
+    MoveEffect.POISON,
+    MoveEffect.PARALYZE,
+    MoveEffect.WILL_O_WISP,
+    # Confusion / tricky
+    MoveEffect.CONFUSE,
+    MoveEffect.SWAGGER,
+    MoveEffect.FLATTER,
+    MoveEffect.TEETER_DANCE,
+    # Misc setup
     MoveEffect.SUBSTITUTE,
     MoveEffect.FOCUS_ENERGY,
+    MoveEffect.LEECH_SEED,
+    MoveEffect.CURSE,
     MoveEffect.INGRAIN,
-    MoveEffect.BELLY_DRUM,
-    MoveEffect.STOCKPILE,
+    MoveEffect.TORMENT,
+    MoveEffect.IMPRISON,
+    MoveEffect.YAWN,
+    MoveEffect.CONVERSION,
+    MoveEffect.MINIMIZE,
+    MoveEffect.DEFENSE_CURL,
+    MoveEffect.CAMOUFLAGE,
 })
 
 # Risky moves (Flag 4)
+# Source: AI_Risky_EffectsToEncourage in pokeemerald data/battle_ai_scripts.s
+# Note: EFFECT_HIGH_CRITICAL is handled separately in apply_flag4 via ctx.move.is_high_crit
 RISKY_EFFECTS: frozenset = frozenset({
+    MoveEffect.SLEEP,
     MoveEffect.EXPLODE,
-    MoveEffect.MEMENTO,
-    MoveEffect.FLAIL,
-    MoveEffect.ERUPTION,
-    MoveEffect.ENDEAVOR,
-    MoveEffect.FOCUS_PUNCH,
-    MoveEffect.SUPERPOWER,
-    MoveEffect.OVERHEAT,
+    MoveEffect.MIRROR_MOVE,
+    MoveEffect.OHKO,
+    MoveEffect.CONFUSE,
+    MoveEffect.METRONOME,
+    MoveEffect.PSYWAVE,
     MoveEffect.COUNTER,
-    MoveEffect.MIRROR_COAT,
     MoveEffect.DESTINY_BOND,
-    MoveEffect.PERISH_SONG,
+    MoveEffect.SWAGGER,
+    MoveEffect.ATTRACT,
+    MoveEffect.PRESENT,
+    MoveEffect.OMNIBOOSTING,
     MoveEffect.BELLY_DRUM,
-    MoveEffect.PAIN_SPLIT,
-    MoveEffect.SKULL_BASH,
-    MoveEffect.RAZOR_WIND,
-    MoveEffect.SKY_ATTACK,
-    MoveEffect.SOLAR_BEAM,
-    MoveEffect.FLY,
-    MoveEffect.DIG,
-    MoveEffect.DIVE,
-    MoveEffect.BOUNCE,
-    MoveEffect.BIDE,
+    MoveEffect.MIRROR_COAT,
+    MoveEffect.FOCUS_PUNCH,
+    MoveEffect.REVENGE,
+    MoveEffect.TEETER_DANCE,
 })
 
 # Stat-lowering move effects (single-stat)
@@ -817,12 +884,16 @@ def _get_target_stage(target: PokemonState, effect: MoveEffect) -> int:
 # ---------------------------------------------------------------------------
 
 def apply_flag3(ctx: BattleContext, rng) -> int:
-    """Return +2 with 80/256 probability if it is the very first battle turn and
-    the move is a setup move; otherwise return 0."""
+    """Return +2 with 176/256 probability if it is the very first battle turn and
+    the move is a setup move; otherwise return 0.
+
+    Probability: pokeemerald uses `if_random_less_than 80` which SKIPS scoring when
+    random < 80, meaning scoring occurs with probability (256 - 80) / 256 = 176/256.
+    """
     if ctx.targeting_ally:
         return 0
     if ctx.is_first_battle_turn and ctx.move.effect in SETUP_FIRST_TURN_EFFECTS:
-        return 2 if rng(80) else 0
+        return 2 if rng(176) else 0
     return 0
 
 
@@ -831,10 +902,13 @@ def apply_flag3(ctx: BattleContext, rng) -> int:
 # ---------------------------------------------------------------------------
 
 def apply_flag4(ctx: BattleContext, rng) -> int:
-    """Return +2 with 128/256 probability if the move is in RISKY_EFFECTS."""
+    """Return +2 with 128/256 probability if the move is in RISKY_EFFECTS or is a high-crit move.
+
+    EFFECT_HIGH_CRITICAL is handled via ctx.move.is_high_crit rather than a separate enum entry.
+    """
     if ctx.targeting_ally:
         return 0
-    if ctx.move.effect in RISKY_EFFECTS:
+    if ctx.move.effect in RISKY_EFFECTS or ctx.move.is_high_crit:
         return 2 if rng(128) else 0
     return 0
 
@@ -1612,8 +1686,8 @@ def score_move(ctx: BattleContext, active_flags: list,
         0: apply_flag0,
         1: apply_flag1,
         2: apply_flag2,
-        #3: apply_flag3,
-        #4: apply_flag4,
+        3: apply_flag3,
+        4: apply_flag4,
         #7: apply_flag7,
     }
     total = 0

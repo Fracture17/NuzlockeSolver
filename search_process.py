@@ -34,7 +34,7 @@ class ShallowSearchProcess:
     """
 
     def __init__(self, node_script_path: str, num_workers: int = 4,
-                 verbose: bool = True):
+                 verbose: bool = True, matchup_cache_path: str | None = None):
         env = os.environ.copy()
         env['PYTHON_GIL'] = '0'
         stderr = None if verbose else subprocess.DEVNULL
@@ -47,11 +47,13 @@ class ShallowSearchProcess:
         )
         self._node_script = node_script_path
         self._num_workers = num_workers
+        self._matchup_cache_path = matchup_cache_path
 
     def search(self, state: dict) -> str:
         """Run shallow search in the subprocess. Returns best action string."""
         req  = {'node_script': self._node_script, 'state': state,
-                'num_workers': self._num_workers}
+                'num_workers': self._num_workers,
+                'matchup_cache': self._matchup_cache_path}
         data = json.dumps(req).encode()
         self._proc.stdin.write(struct.pack('>I', len(data)) + data)
         self._proc.stdin.flush()

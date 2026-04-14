@@ -151,10 +151,10 @@ def matchup_reward(state: dict, player: int = 1) -> float:
     score -= numP1Statuses / 2
     score += numP2Statuses / 2
 
-    p1PPScore = ppScore(p1)
-    p2PPScore = ppScore(p2)
-    score -= p1PPScore / 10
-    score += p2PPScore
+    #p1PPScore = ppScore(p1)
+    #p2PPScore = ppScore(p2)
+    #score -= p1PPScore / 10
+    #score += p2PPScore
 
     numP1Boosts = sum(p1["boosts"].values())
     numP2Boosts = sum(p2["boosts"].values())
@@ -185,7 +185,7 @@ def _run_matchup_context(ipc, decision_fn, team1, team2,
                          setup_p1, setup_p2, num_runs,
                          max_runs=8, sem_threshold=0.1,
                          turn_limit=10, convergence_penalty=1.0,
-                         badge_boosts=None):
+                         badge_boosts=None, p1_init_status=None):
     """Play out battles using decision_fn until the score estimate converges.
 
     Returns MatchupResult.
@@ -224,7 +224,9 @@ def _run_matchup_context(ipc, decision_fn, team1, team2,
     scores = []
 
     while True:
-        resp = ipc.send({"new": True, "team1": team1, "team2": team2, **(badge_boosts or {})})
+        init_state = {"p1InitState": [{"status": p1_init_status}]} if p1_init_status else {}
+        resp = ipc.send({"new": True, "team1": team1, "team2": team2,
+                         **(badge_boosts or {}), **init_state})
         state = parse_ipc_response(resp)
 
         if setup_p1 is not None:
@@ -276,7 +278,7 @@ class MatchupInfo:
     def __init__(self, node_script_path: str, level_multiplier: float = 1.0,
                  num_workers: int = 4, num_runs: int = 3,
                  max_runs: int = 8, sem_threshold: float = 0.1,
-                 turn_limit: int = 10, convergence_penalty: float = 1.0,
+                 turn_limit: int = 100, convergence_penalty: float = 1.0,
                  box_raw=None, opp_raw=None, badge_boosts=None):
         """Generate full matchup data for all BOX vs OPPONENT combinations.
 
@@ -316,10 +318,12 @@ class MatchupInfo:
             completed = 0
             total = len(self.box) * len(self.opp)
             for p in self.box:
+                pipe_parts = self.box[p].split('|')
+                has_guts = len(pipe_parts) > 3 and pipe_parts[3] == 'guts'
+
                 for p2 in self.opp:
-                    contexts = {}
-                    contexts[None] = _run_matchup_context(
-                        ipc, decision_fn,
+                    _ctx_kwargs = dict(
+                        ipc=ipc, decision_fn=decision_fn,
                         team1=self.box[p], team2=self.opp[p2],
                         setup_p1=None, setup_p2=None,
                         num_runs=num_runs,
@@ -327,7 +331,20 @@ class MatchupInfo:
                         turn_limit=turn_limit, convergence_penalty=convergence_penalty,
                         badge_boosts=self.badge_boosts,
                     )
-                    print(p, p2, contexts[None])
+                    contexts = {}
+                    normal_result = _run_matchup_context(**_ctx_kwargs)
+                    if has_guts:
+                        poisoned_result = _run_matchup_context(**_ctx_kwargs,
+                                                               p1_init_status='psn')
+                        if poisoned_result.score > normal_result.score:
+                            contexts[None] = poisoned_result
+                            print(f"{p} {p2} {poisoned_result}  [guts+psn {poisoned_result.score:+.3f} > normal {normal_result.score:+.3f}]")
+                        else:
+                            contexts[None] = normal_result
+                            print(f"{p} {p2} {normal_result}  [guts normal {normal_result.score:+.3f} >= psn {poisoned_result.score:+.3f}]")
+                    else:
+                        contexts[None] = normal_result
+                        print(p, p2, contexts[None])
 
                     #Ignore switch in context for now
                     """for move_i in range(1, 5):
@@ -363,6 +380,138 @@ class MatchupInfo:
                     #move3=contexts[3],
                     #move4=contexts[4],
                 ))
+        return result
+
+    # ---------------------------------------------------------------------------
+    # Cache validation and matchup bias helpers
+    # ---------------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_species(raw: str) -> str:
+        """Normalize a PS species string to a cache-compatible display name.
+
+        PS returns species as '[Species:zigzagoon]'; this strips the wrapper
+        and capitalizes to match the pipe-string keys in self.box / self.opp.
+        If the string contains no colon (already normalized), it is returned
+        capitalized as-is.
+        """
+        if ':' in raw:
+            raw = raw.split(':')[1].rstrip(']')
+        return raw.capitalize()
+
+    @staticmethod
+    def _parse_pipe_for_validation(pipe_str: str) -> dict:
+        """Extract level and moves from a PS pipe string for cache validation.
+
+        Returns {'level': int, 'moves': frozenset[str]}.
+        Level is at index -2 (empty → 100); moves are at index 4, comma-separated.
+        """
+        parts = pipe_str.split('|')
+        level_str = parts[-2].strip() if len(parts) >= 2 else ''
+        level = int(level_str) if level_str else 100
+        moves_str = parts[4] if len(parts) > 4 else ''
+        moves = frozenset(m for m in moves_str.split(',') if m)
+        return {'level': level, 'moves': moves}
+
+    def validate_for_state(self, state: dict) -> bool:
+        """Check that all visible pokemon in state match entries in the cache.
+
+        Validates p1 party (full) against self.box and revealed p2 pokemon against
+        self.opp. Checks species lookup, level, and move set. Returns False on any
+        mismatch or missing entry; True only if all pass.
+        """
+        sides = state.get('battle', {}).get('sides', [])
+        if len(sides) < 2:
+            return False
+
+        def _check(pokemon_list, cache_dict):
+            for pk in pokemon_list:
+                species = self._parse_species(pk.get('species', ''))
+                if species not in cache_dict:
+                    return False
+                pipe_str = cache_dict[species]
+                cached = self._parse_pipe_for_validation(pipe_str)
+                # Level check
+                state_level = pk.get('set', {}).get('level', 100)
+                if state_level != cached['level']:
+                    return False
+                # Move check
+                state_moves = frozenset(
+                    slot['id'] for slot in pk.get('moveSlots', []) if slot.get('id')
+                )
+                if state_moves != cached['moves']:
+                    return False
+            return True
+
+        p1_pokemon = sides[0].get('pokemon', [])
+        p2_pokemon = sides[1].get('pokemon', [])
+        return _check(p1_pokemon, self.box) and _check(p2_pokemon, self.opp)
+
+    def get_switch_biases(self, state: dict, p1_switches: list) -> dict:
+        """Compute per-switch matchup averages for the active and each bench pokemon.
+
+        Returns {switch_action: (active_avg, bench_avg)} where both values are the
+        mean rawMatchupInfo[species][opp][None].score over alive non-active opponents.
+        Bias = active_avg - bench_avg.
+
+        Uses the cache's full opponent roster (self.opp) as the source of truth for
+        who is alive, since unrevealed pokemon do not appear in the battle state.
+        Excludes only the currently active opponent and any confirmed-fainted ones
+        (hp == 0 in battle state). Returns {} if none remain (all defeated).
+        Omits switch entries where any matchup lookup fails.
+        """
+        from battle_sim import _get_active_pokemon
+        sides = state.get('battle', {}).get('sides', [])
+        if len(sides) < 2:
+            return {}
+
+        # Identify confirmed-fainted and active opponent species from battle state
+        active_opp_species = None
+        fainted_opp_species = set()
+        for pk in sides[1].get('pokemon', []):
+            if pk.get('isActive', False):
+                active_opp_species = self._parse_species(pk.get('species', ''))
+            elif pk.get('hp', 0) == 0:
+                fainted_opp_species.add(self._parse_species(pk.get('species', '')))
+
+        # Use the cache roster as ground truth; exclude active + confirmed fainted
+        alive_opp_species = [
+            s for s in self.opp
+            if s != active_opp_species and s not in fainted_opp_species
+        ]
+        if not alive_opp_species:
+            return {}
+
+        active_p1 = _get_active_pokemon(sides[0])
+        if active_p1 is None:
+            return {}
+        active_species = self._parse_species(active_p1.get('species', ''))
+
+        def _avg_score(species):
+            total = 0.0
+            for opp_species in alive_opp_species:
+                entry = self.rawMatchupInfo.get(species, {}).get(opp_species, {}).get(None)
+                if entry is None:
+                    return None
+                total += entry.score
+            return total / len(alive_opp_species)
+
+        active_avg = _avg_score(active_species)
+
+        result = {}
+        for switch in p1_switches:
+            try:
+                slot = int(switch.split()[1]) - 1
+            except (IndexError, ValueError):
+                continue
+            bench_pokemon_list = sides[0].get('pokemon', [])
+            if slot < 0 or slot >= len(bench_pokemon_list):
+                continue
+            bench_species = self._parse_species(bench_pokemon_list[slot].get('species', ''))
+            bench_avg = _avg_score(bench_species)
+            if active_avg is None or bench_avg is None:
+                continue
+            result[switch] = (active_avg, bench_avg)
         return result
 
     def __getstate__(self):

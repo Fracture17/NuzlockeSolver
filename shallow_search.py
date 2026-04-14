@@ -25,12 +25,65 @@ from battle_sim import (
     _get_active_pokemon,
     _pick_opponent_action,
     can_player_switch,
+    get_voluntary_switches,
     get_p2_move_candidates,
     simulate_turn,
 )
 
+# ---------------------------------------------------------------------------
+# Opponent item prediction helpers
+# ---------------------------------------------------------------------------
+
+# Heal amounts (HP restored) keyed by PS item ID, for AI_ITEM_HEAL_HP items.
+_ITEM_HEAL_AMOUNTS: dict[str, int] = {
+    'potion':      20,
+    'superpotion': 50,
+    'hyperpotion': 200,
+}
+
+
+def _opp_item_threshold_met(opp_active: dict, item_ps_id: str) -> bool:
+    """Return True if the opponent's active pokemon meets the threshold for item use.
+
+    Mirrors pokeemerald ShouldUseItem():
+      - Full-restore-type items fire when hp < maxHP / 4.
+      - Heal-HP items also fire when (maxHP - hp) > healAmount.
+    """
+    hp    = opp_active.get('hp', 0)
+    maxhp = opp_active.get('maxhp', 1)
+    if hp <= 0:
+        return False
+    if hp < maxhp / 4:
+        return True
+    heal = _ITEM_HEAL_AMOUNTS.get(item_ps_id)
+    if heal is not None and (maxhp - hp) > heal:
+        return True
+    return False
+
+
+def _opp_reservation_allows_item(state: dict) -> bool:
+    """Return True if the pokeemerald reservation system allows item use this turn.
+
+    pokeemerald skips item slot i when i != 0 AND validMons > (itemsNo - i) + 1.
+    The slot index equals how many items have already been used.
+    """
+    remaining = state.get('opp_items_remaining', 0)
+    initial   = state.get('opp_items_initial', remaining)
+    used      = initial - remaining
+    if used == 0:
+        return True   # slot 0 is always allowed
+    # Count living opponent pokemon from the PS state.
+    opp_side  = state.get('battle', {}).get('sides', [{}, {}])[1]
+    valid_mons = sum(1 for p in opp_side.get('pokemon', []) if p.get('hp', 0) > 0)
+    return valid_mons <= (initial - used) + 1
+
 NUM_SAMPLES = 20
-MAX_DEPTH = 3
+MAX_DEPTH = 2
+MATCHUP_WEIGHT: float = 0  # Scale factor applied to matchup cache switch bias
+
+# Module-level matchup cache state (loaded once per unique path, reused across requests)
+_matchup_cache = None       # MatchupInfo object or None
+_matchup_cache_path = None  # Path string of the currently loaded cache
 # Fraction of outcome probability mass to consider when scoring an action, measured from
 # the worst outcome upward.  1.0 = full expected value (current behaviour).  Lower values
 # make the search progressively more risk-averse by ignoring lucky high-score scenarios.
@@ -43,10 +96,13 @@ VARIANCE_ANALYSIS = False
 # Scoring
 # ---------------------------------------------------------------------------
 
-def _score_state(state: dict) -> float:
+def _score_state(state: dict, early_win_bonus: float = 0.0) -> float:
     """Score a battle state from p1's perspective.
 
     Scores battle state from p1's perspective (HP%, faint counts, boosts).
+    early_win_bonus: added to a p1 win score when the win is found before
+    MAX_DEPTH turns. Caller computes 0.1 * (MAX_DEPTH - turn_num) so that
+    a T1 win gets +0.2 and a T2 win gets +0.1, preferring faster wins.
     """
     sides = state["battle"].get("sides", [])
     if len(sides) < 2:
@@ -64,9 +120,8 @@ def _score_state(state: dict) -> float:
     p1_fainted = sum(1 for p in p1_pokemon if p.get("hp", 0) <= 0)
     p2_fainted = sum(1 for p in p2_pokemon if p.get("hp", 0) <= 0)
 
-
     if p2_fainted == len(p2_pokemon) and p2_pokemon:
-        return 20.0 - p1_fainted * 20
+        return 20.0 - p1_fainted * 20 + early_win_bonus
 
     score = 0.0
 
@@ -93,10 +148,24 @@ def _score_state(state: dict) -> float:
         for p in p2_pokemon
         if p.get("isActive")
     )
-    score += numP1Boosts * 0.2
-    score -= numP2Boosts * 0.2
+    score += numP1Boosts * .2
+    score -= numP2Boosts * .2
 
     return score
+
+
+def _is_switch_only(state: dict) -> bool:
+    """Return True when the state requires a forced player switch.
+
+    A forced switch has p1_switches available but no p1_moves (the active
+    Pokémon fainted) and the battle is still ongoing.  These nodes do not
+    consume a search depth slot — they are re-expanded at the same depth.
+    """
+    return (
+        bool(state.get("p1_switches"))
+        and not state.get("p1_moves")
+        and not state.get("is_over")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -184,19 +253,34 @@ def _get_opp_weights(state: dict) -> list[tuple[Optional[str], float]]:
     item this turn), that action is returned with probability 1.0, matching the
     behaviour of simulate_turn which checks the same key.
 
+    If the opponent has items remaining and their active pokemon meets the item
+    threshold (and the pokeemerald reservation system allows it), the item action
+    is returned with probability 1.0.
+
     Raises RuntimeError if no opponent actions are available (shouldn't happen
     in a live battle before the battle is over unless the player is in a forced switch).
     """
     forced = state.get("known_p2")
     #print("forced-:", forced)
     if forced:
-        #print("forced:", forced)
+        print("forced:", forced, file=sys.stderr)
         return [(forced, 1.0)]
+    # Check predicted item use before normal move/switch scoring.
+    item_ps_id = state.get('opp_item_ps_id', '')
+    if state.get('opp_items_remaining', 0) > 0 and item_ps_id:
+        opp_side   = state.get('battle', {}).get('sides', [{}, {}])[1]
+        opp_active = _get_active_pokemon(opp_side)
+        if (opp_active is not None
+                and _opp_item_threshold_met(opp_active, item_ps_id)
+                and _opp_reservation_allows_item(state)):
+            return [(f'item {item_ps_id}', 1.0)]
+    ai_flags = state.get('opp_ai_flags')
     if state.get("p2_moves"):
-        candidates = get_p2_move_candidates(state, state["p2_moves"], player=2)
+        candidates = get_p2_move_candidates(state, state["p2_moves"], player=2,
+                                            active_flags=ai_flags)
         return candidates if candidates else [(state["p2_moves"][0], 1.0)]
     if state.get("p2_switches"):
-        action = _pick_opponent_action(state)
+        action = _pick_opponent_action(state, active_flags=ai_flags)
         return [(action, 1.0)]
     if state.get("p1_switches") and state['battle'].get("requestState") == "switch":
         return [(None, 1.0)]
@@ -206,12 +290,26 @@ def _get_opp_weights(state: dict) -> list[tuple[Optional[str], float]]:
 
 
 def _print_opp_actions(state: dict) -> None:
-    """Print the opponent's available actions and probabilities, matching MCTS format."""
+    """Print the opponent's available actions and probabilities.
+
+    Mirrors _get_opp_weights: known_p2 takes priority over move/switch inference.
+    """
+    known_p2 = state.get("known_p2")
+    if known_p2 and str(known_p2).startswith("item "):
+        print(f'[shallow_search] Opp: using item')
+        print(f'  {known_p2[5:]}  prob=1.00')
+        return
+    if known_p2:
+        print(f'[shallow_search] Opp: forced action')
+        print(f'  {known_p2}  prob=1.00')
+        return
+    ai_flags = state.get('opp_ai_flags')
     if state.get("p2_moves"):
         print('[shallow_search] Opp move probabilities:')
-        get_p2_move_candidates(state, state["p2_moves"], player=2, log=True)
+        get_p2_move_candidates(state, state["p2_moves"], player=2,
+                               active_flags=ai_flags, log=True)
     elif state.get("p2_switches"):
-        action = _pick_opponent_action(state)
+        action = _pick_opponent_action(state, active_flags=ai_flags)
         print('[shallow_search] Opp switch probabilities:')
         print(f'  {action}  prob=1.00')
     else:
@@ -315,7 +413,7 @@ class UniformSampler:
                 weight *= _branch_weight(result[state_key], f)
 
             fp = StateFingerprint(result)
-            if is_last_turn:
+            if is_last_turn and not _is_switch_only(result):
                 results.append((_score_state(result), fp, weight))
             else:
                 results.append((result, fp, weight))
@@ -363,6 +461,15 @@ class FactorTracker:
         self.n += 1
         if forced:
             self.s += 1
+
+    def skip(self) -> None:
+        """Record that one stratum sample was ineligible for this factor.
+
+        Decrements N so future q() calls see the correct remaining budget.
+        Without this, N - local_i overstates the remaining eligible slots,
+        causing q() to over-compensate in later samples.
+        """
+        self.N = max(self.n, self.N - 1)
 
 
 @dataclass
@@ -412,6 +519,56 @@ class CategoricalTracker:
         self.counts[k] += 1
 
 
+# ---------------------------------------------------------------------------
+# Factor prior helpers
+# ---------------------------------------------------------------------------
+
+_CRIT_A = 2.0 * (1.0 / 16.0)   # Beta prior centered at 1/16, concentration=2
+_CRIT_B = 2.0 * (15.0 / 16.0)
+
+
+def _move_priors_from_info(info: dict | None) -> tuple:
+    """Return (accuracy_frac, secondary_frac) from one p1MoveInfo/p2MoveInfo entry."""
+    if not info:
+        return (1.0, 0.0)
+    acc = info.get("accuracy")
+    sec = info.get("secondaryChance")
+    return (
+        acc / 100.0 if acc is not None else 1.0,
+        sec / 100.0 if sec is not None else 0.0,
+    )
+
+
+def _factor_priors(p1_action: str, p2_action, node_state: dict) -> list:
+    """Return 6 (a, b) Beta prior pairs for FactorTracker, in _FACTOR_SPECS order.
+
+    Order: p1_crit, p2_crit, p1_accuracy, p2_accuracy, p1_secondary, p2_secondary.
+    All priors use concentration=2 (a + b = 2).  Crit is always 1/16.  Accuracy
+    and secondary are derived from the IPC move info for the specific actions used.
+    Called once per opponent-action stratum so each stratum gets the correct p2 prior.
+    """
+    def _get(action, infos):
+        if action and str(action).startswith("move "):
+            slot = int(str(action).split()[1]) - 1
+            return infos[slot] if slot < len(infos) else None
+        return None
+
+    p1_acc, p1_sec = _move_priors_from_info(_get(p1_action, node_state.get("p1_move_info", [])))
+    p2_acc, p2_sec = _move_priors_from_info(_get(p2_action, node_state.get("p2_move_info", [])))
+
+    def _ab(p: float) -> tuple:
+        return (p * 2.0, (1.0 - p) * 2.0)
+
+    return [
+        (_CRIT_A, _CRIT_B),   # p1 crit
+        (_CRIT_A, _CRIT_B),   # p2 crit
+        _ab(p1_acc),           # p1 accuracy
+        _ab(p2_acc),           # p2 accuracy
+        _ab(p1_sec),           # p1 secondary
+        _ab(p2_sec),           # p2 secondary
+    ]
+
+
 class StratifiedSampler:
     """Sequential stratified sampler with online Beta-prior updating.
 
@@ -425,59 +582,66 @@ class StratifiedSampler:
       Pass 2 — compute final p_hat values, then compute importance weights.
     """
 
-    def __init__(self, n_samples: int, prior_a: float = 1.0, prior_b: float = 1.0):
+    def __init__(self, n_samples: int):
         self._n = n_samples
-        self._prior_a = prior_a
-        self._prior_b = prior_b
 
     def run(self, ipc, node_state: dict, p1_action: str, opp_weights: list,
             is_last_turn: bool = False) -> list:
         """Run self._n simulations and return list of (item, fingerprint, weight).
 
-        Opponent action selection is treated as an additional controlled factor
-        using a Dirichlet-posterior CategoricalTracker.  The factor is ineligible
-        (skipped entirely) when the opponent's pokemon fainted before their turn,
-        or when the opp_action is a switch (deterministic, not a move choice).
-        When there is only one possible opponent action it is always ineligible.
+        Opponent action is stratified via CategoricalTracker (global index i).
+        One set of 6 FactorTrackers is maintained per opponent-action stratum so that
+        binary RNG priors and empirical estimates are conditioned on which move the
+        opponent actually used.  Each stratum tracker uses N_k = round(N * p_k) as its
+        budget.  When a binary factor is ineligible for a sample, skip() decrements
+        that tracker's N so future q() calls see the correct remaining eligible budget.
 
         Normal turns:  item = state_dict.
         Last turn:     item = score_float (state never stored).
         """
-        # Binary RNG trackers
-        trackers = [
-            FactorTracker(a=self._prior_a, b=self._prior_b, N=self._n)
-            for _ in _FACTOR_SPECS
-        ]
-
-        # Opponent categorical tracker — skip if deterministic (≤1 action)
         opp_actions  = [a for a, _ in opp_weights]
         opp_probs    = [p for _, p in opp_weights]
         opp_is_multi = len(opp_weights) > 1
+
+        # Opponent categorical tracker — stratifies over global samples
         if opp_is_multi:
-            concentration = self._prior_a + self._prior_b
             opp_tracker = CategoricalTracker(
-                priors=[p * concentration for p in opp_probs],
+                priors=[p * 2.0 for p in opp_probs],
                 N=self._n,
                 counts=[0] * len(opp_actions),
             )
+
+        # Per-stratum binary factor tracker sets — one per opponent action
+        strata = []
+        for opp_action, prob in opp_weights:
+            n_k = max(1, round(self._n * prob))
+            priors = _factor_priors(p1_action, opp_action, node_state)
+            strata.append({
+                'trackers': [FactorTracker(a=a, b=b, N=n_k) for (a, b) in priors],
+                'count': 0,   # samples seen in this stratum so far
+            })
 
         # Pass 1: simulate all samples
         # Records: (item, fp, forced_list, q_list, eligible_list, opp_k, opp_q, opp_elig)
         records = []
         for i in range(self._n):
-            # Sample opponent action
+            # Sample opponent action (stratified via CategoricalTracker)
             if opp_is_multi:
-                qs = opp_tracker.q_values(i)
+                qs    = opp_tracker.q_values(i)
                 opp_k = random.choices(range(len(opp_actions)), weights=qs)[0]
                 opp_q = qs[opp_k]
             else:
                 opp_k, opp_q = 0, 1.0
             opp_action = opp_actions[opp_k]
 
-            # Sample binary factors
+            stratum  = strata[opp_k]
+            trackers = stratum['trackers']
+            local_i  = stratum['count']
+
+            # Sample binary factors using this stratum's per-step q values
             forced_list, q_list = [], []
             for tracker in trackers:
-                q_i = tracker.q(i)
+                q_i = tracker.q(local_i)
                 f = random.random() < q_i
                 forced_list.append(f)
                 q_list.append(q_i)
@@ -489,7 +653,8 @@ class StratifiedSampler:
 
             result = simulate_turn(ipc, node_state, p1_action, opp_action, flags=flags)
 
-            # Binary factor eligibility + updates
+            # Binary factor eligibility + updates (within this stratum only)
+            # skip() adjusts N when ineligible so future q() sees the correct budget
             eligible_list = []
             for j, (state_key, _, _) in enumerate(_FACTOR_SPECS):
                 chance = result[state_key]
@@ -497,10 +662,12 @@ class StratifiedSampler:
                 eligible_list.append(eligible)
                 if eligible:
                     trackers[j].update(forced_list[j])
+                else:
+                    trackers[j].skip()
 
-            # Opponent factor eligibility + update
-            # Ineligible when: not a move action, or opponent fainted before moving
-            # (detected by p2 needing a forced switch with no move choices remaining).
+            stratum['count'] += 1
+
+            # Opponent eligibility: move actually executed (not a switch, not OHKOd first)
             opp_elig = (
                 opp_is_multi
                 and opp_action is not None
@@ -512,31 +679,30 @@ class StratifiedSampler:
                 opp_tracker.update(opp_k)
 
             fp   = StateFingerprint(result)
-            item = _score_state(result) if is_last_turn else result
+            item = _score_state(result) if (is_last_turn and not _is_switch_only(result)) else result
             records.append((item, fp, forced_list, q_list, eligible_list,
                             opp_k, opp_q, opp_elig))
 
-        # Pass 2: compute importance weights using final p_hat values
-        final_p_hats     = [t.p_hat for t in trackers]
+        # Pass 2: importance weights = binary factor weights × opponent move weight
+        final_p_hats     = [[t.p_hat for t in s['trackers']] for s in strata]
         final_opp_p_hats = opp_tracker.p_hats if opp_is_multi else []
 
         results = []
         for item, fp, forced_list, q_list, eligible_list, opp_k, opp_q, opp_elig in records:
             weight = 1.0
-            # Binary factors
+            p_hats = final_p_hats[opp_k]
             for j, eligible in enumerate(eligible_list):
                 if not eligible:
                     continue
-                p   = final_p_hats[j]
-                q_i = q_list[j]
-                f   = forced_list[j]
+                p     = p_hats[j]
+                q_i   = q_list[j]
+                f     = forced_list[j]
                 denom = q_i if f else (1.0 - q_i)
                 numer = p  if f else (1.0 - p)
                 if denom == 0.0:
                     weight = 0.0
                     break
                 weight *= numer / denom
-            # Opponent factor
             if weight != 0.0 and opp_elig:
                 if opp_q == 0.0:
                     weight = 0.0
@@ -573,14 +739,16 @@ def _run_group(ipc_pool, node_state: dict, p1_action: str, opp_weights: list,
 
     mean_stddev = None
     if is_last_turn and VARIANCE_ANALYSIS:
-        n = len(results)
-        total_w = sum(w for _, _fp, w in results)
+        # Filter to float items only — switch-only results arrive as dicts and must be excluded.
+        float_results = [(s, fp, w) for s, fp, w in results if not isinstance(s, dict)]
+        n = len(float_results)
+        total_w = sum(w for _, _fp, w in float_results)
         if n >= 2 and total_w > 0:
-            mu = sum(s * w for s, _fp, w in results) / total_w
-            var = sum(w * (s - mu) ** 2 for s, _fp, w in results) / total_w
+            mu = sum(s * w for s, _fp, w in float_results) / total_w
+            var = sum(w * (s - mu) ** 2 for s, _fp, w in float_results) / total_w
             mean_stddev = (mu, var ** 0.5)
         else:
-            mu = sum(s for s, _fp, _w in results) / n if n else 0.0
+            mu = sum(s for s, _fp, _w in float_results) / n if n else 0.0
             mean_stddev = (mu, 0.0)
 
     return results, mean_stddev
@@ -671,12 +839,19 @@ def expand_turn_parallel(
     tasks = []
     for node in frontier:
         if node.state is not None and node.state.get("is_over"):
-            node.score = _score_state(node.state)  # terminal: score in place, no tasks needed
+            # Early win bonus: 0.1 per turn ahead of MAX_DEPTH (T1→+0.2, T2→+0.1, T3→+0.0)
+            bonus = 0.1 * (MAX_DEPTH - turn_num) if turn_num < MAX_DEPTH else 0.0
+            node.score = _score_state(node.state, early_win_bonus=bonus)
             continue
 
-        p1_actions = list(node.state.get("p1_moves") or [])
-        if can_player_switch(node.state):
-            p1_actions += list(node.state.get("p1_switches") or [])
+        p1_moves    = list(node.state.get("p1_moves")    or [])
+        p1_switches = list(node.state.get("p1_switches") or [])
+        if p1_moves:
+            # Normal turn: add safe voluntary switches (empty if switching not allowed)
+            p1_actions = p1_moves + get_voluntary_switches(node.state, p1_switches)
+        else:
+            # Forced faint-switch: no moves available, switches are the only option
+            p1_actions = p1_switches
         if not p1_actions:
             continue
 
@@ -717,10 +892,13 @@ def expand_turn_parallel(
     for parent_node, p1_action, item, fp, weight in raw_results:
         node = seen.get(fp)
         if node is None:
-            if is_last_turn:
-                node = TurnNode(state=None, turn=turn_num, action=p1_action, score=item)
-            else:
+            if isinstance(item, dict):
+                # State dict: either a normal non-leaf or a switch-only result that
+                # bypassed scoring even at is_last_turn — must retain state for re-expansion.
                 node = TurnNode(state=item, turn=turn_num, action=p1_action)
+            else:
+                # Float score: a genuine scored leaf node.
+                node = TurnNode(state=None, turn=turn_num, action=p1_action, score=item)
             seen[fp] = node
             new_nodes.append(node)
             total_new += 1
@@ -813,7 +991,7 @@ def GetScore(node: TurnNode) -> float:
 # Recursive score printing
 # ---------------------------------------------------------------------------
 
-def _print_turn_scores(parents: list, turn_num: int) -> None:
+def _print_turn_scores(parents: list, turn_num: int, matchup_details: dict | None = None) -> None:
     """Print aggregated action scores for one depth level.
 
     parents is a list of (TurnNode, cumulative_weight) pairs representing all
@@ -887,11 +1065,16 @@ def _print_turn_scores(parents: list, turn_num: int) -> None:
 
     for action, w_mean, w_sd, u_sd, from_n, to_n in results:
         marker = " <- BEST" if action == best_action else ""
+        matchup_str = ''
+        if matchup_details and action in matchup_details:
+            active_c, bench_c = matchup_details[action]
+            total_c = active_c - bench_c
+            matchup_str = f'  [matchup: active={active_c:+.3f}  bench={bench_c:+.3f}  total={total_c:+.3f}]'
         print(f"  {action:<22s}  score={w_mean:.4f}  wsd={w_sd:.4f}  sd={u_sd:.4f}"
-              f"  from={from_n}  to={to_n}{marker}")
+              f"  from={from_n}  to={to_n}{matchup_str}{marker}")
 
 
-def print_scores(root: TurnNode) -> None:
+def print_scores(root: TurnNode, matchup_details: dict | None = None) -> None:
     """Print aggregated action scores at each depth along the best-action path.
 
     For each turn level, aggregates action scores across all reachable states
@@ -908,7 +1091,8 @@ def print_scores(root: TurnNode) -> None:
         if not any(node.action_scores for node, _ in parents):
             break
 
-        _print_turn_scores(parents, turn_num)
+        _print_turn_scores(parents, turn_num,
+                           matchup_details=matchup_details if turn_num == 1 else None)
 
         # Advance: follow each parent's best_action to its children, multiplying weights
         next_parents = []
@@ -983,8 +1167,121 @@ def _print_action_variance(root: TurnNode) -> None:
 # Search entry point (used by server loop below)
 # ---------------------------------------------------------------------------
 
-def run_search(state: dict, node_script_path: str, num_workers: int) -> str:
+def _drain_switch_nodes(
+    frontier: list,
+    ipc_pool: _IPCPool,
+    depth: int,
+    n_workers: int,
+    is_last_turn: bool,
+) -> list:
+    """Expand all switch-only nodes in the frontier at the same depth, looping until none remain.
+
+    Switch-only nodes (forced faint-switch, no p1_moves) do not consume a depth slot.
+    They are re-expanded immediately at the same depth with the same is_last_turn flag,
+    and their children replace them in the frontier.  The while-loop handles consecutive
+    forced switches (e.g. both players faint on the same simulated turn).
+
+    Switch nodes remain in the tree — they are already linked as children of their parents
+    by expand_turn_parallel.  Only the returned frontier is updated.
+    expand_turn_parallel clears node.state for every node it expands, so processed switch
+    nodes will not re-trigger the predicate in subsequent iterations.
+    """
+    while True:
+        switch_nodes = [
+            n for n in frontier
+            if n.state is not None and _is_switch_only(n.state)
+        ]
+        if not switch_nodes:
+            return frontier
+        non_switch = [
+            n for n in frontier
+            if not (n.state is not None and _is_switch_only(n.state))
+        ]
+        expanded = expand_turn_parallel(switch_nodes, ipc_pool, depth, n_workers, is_last_turn)
+        frontier = non_switch + expanded
+
+
+def _load_matchup_cache(path):
+    """Load (or return cached) MatchupInfo from a pickle file.
+
+    Returns None if path is None, loading fails, or module is unavailable.
+    Caches the result by path so repeated calls within the same process are free.
+    """
+    global _matchup_cache, _matchup_cache_path
+    if path is None:
+        return None
+    if path == _matchup_cache_path:
+        return _matchup_cache
+    try:
+        import pickle
+        from MatchupInfo import MatchupInfo
+        with open(path, 'rb') as f:
+            obj = pickle.load(f)
+        if not isinstance(obj, MatchupInfo):
+            raise TypeError(f'Expected MatchupInfo, got {type(obj).__name__}')
+        _matchup_cache = obj
+        _matchup_cache_path = path
+        print(f'[matchup] Loaded cache from {path}', file=sys.stderr)
+        return _matchup_cache
+    except Exception as e:
+        print(f'[matchup] Failed to load cache from {path}: {e}', file=sys.stderr)
+        _matchup_cache = None
+        _matchup_cache_path = path  # remember the path so we don't retry every turn
+        return None
+
+
+def _apply_matchup_bias(root: 'TurnNode', state: dict, matchup_cache) -> dict:
+    """Bias switch action scores in root using the matchup cache.
+
+    Applied after GetScore(root). Modifies root.action_scores in-place and
+    recomputes root.best_action and root.score.
+
+    Returns {action: (active_contrib, bench_contrib)} where both values are
+    scaled by MATCHUP_WEIGHT (for use in the per-turn printout). Returns {}
+    when no bias is applied. Returns {'_validation_failed': True} on cache
+    mismatch so the caller can print a status line.
+    """
+    if matchup_cache is None:
+        return {}
+    # Mirror the action-building logic in expand_turn_parallel:
+    # on a normal turn, voluntary switches come from get_voluntary_switches,
+    # not directly from state['p1_switches'] (which IPC leaves empty for non-faint turns).
+    p1_moves      = state.get('p1_moves') or []
+    p1_switches_raw = state.get('p1_switches') or []
+    if p1_moves:
+        p1_switches = get_voluntary_switches(state, p1_switches_raw)
+    else:
+        p1_switches = p1_switches_raw
+    if not p1_switches:
+        return {}
+    if not matchup_cache.validate_for_state(state):
+        return {'_validation_failed': True}
+    # {action: (active_avg, bench_avg)}
+    avgs = matchup_cache.get_switch_biases(state, p1_switches)
+    if not avgs:
+        return {}
+    details = {}
+    for action, (active_avg, bench_avg) in avgs.items():
+        bias = active_avg - bench_avg
+        if action in root.action_scores:
+            root.action_scores[action] += MATCHUP_WEIGHT * bias
+        details[action] = (active_avg * MATCHUP_WEIGHT, bench_avg * MATCHUP_WEIGHT)
+    # Recompute best action after bias
+    root.best_action = max(root.action_scores, key=root.action_scores.__getitem__)
+    root.score = root.action_scores[root.best_action]
+    return details
+
+
+def run_search(state: dict, node_script_path: str, num_workers: int,
+               matchup_cache_path: str | None = None) -> str:
     """Run MAX_DEPTH-turn parallel shallow search. Returns best action string."""
+    cache = _load_matchup_cache(matchup_cache_path)
+    # Per-search cache status (printed before the tree expansion starts)
+    if cache is not None:
+        print(f'[matchup] Cache active', file=sys.stderr)
+    elif matchup_cache_path is not None:
+        print(f'[matchup] Cache unavailable', file=sys.stderr)
+
     ipc_pool = _IPCPool(node_script_path, num_workers)
     try:
         root = TurnNode(state=state, turn=0, action="")
@@ -993,15 +1290,26 @@ def run_search(state: dict, node_script_path: str, num_workers: int) -> str:
         for depth in range(1, MAX_DEPTH + 1):
             is_last = (depth == MAX_DEPTH)
             frontier = expand_turn_parallel(frontier, ipc_pool, depth, num_workers, is_last)
+            frontier = _drain_switch_nodes(frontier, ipc_pool, depth, num_workers, is_last)
 
         GetScore(root)
+        if MATCHUP_WEIGHT > 0:
+            matchup_details = _apply_matchup_bias(root, state, cache)
+        else:
+            matchup_details = {}
 
         # Redirect stdout → stderr during printing so it doesn't corrupt the framing protocol
         _real_stdout = sys.stdout
         sys.stdout = sys.stderr
         try:
             _print_opp_actions(state)
-            print_scores(root)
+            if matchup_details.get('_validation_failed'):
+                print('[matchup] Cache validation failed — no bias applied')
+            elif matchup_details:
+                print(f'[matchup] Cache OK — bias applied to {len(matchup_details)} switch action(s)')
+            elif cache is not None:
+                print('[matchup] Cache OK — no switches to bias')
+            print_scores(root, matchup_details=matchup_details)
             if VARIANCE_ANALYSIS:
                 _print_action_variance(root)
             print()
@@ -1041,7 +1349,8 @@ def main():
         except EOFError:
             break
         req = json.loads(_read_exact(length))
-        action = run_search(req['state'], req['node_script'], req['num_workers'])
+        action = run_search(req['state'], req['node_script'], req['num_workers'],
+                            matchup_cache_path=req.get('matchup_cache'))
         _send({'action': action})
 
 

@@ -36,7 +36,9 @@ _HERE          = os.path.dirname(os.path.abspath(__file__))
 _SAVESTATE_DIR = os.path.join(_HERE, 'savestates')
 _LOG_DIR       = os.path.join(_HERE, 'test_logs')
 
-SHALLOW_WORKERS = 30
+SHALLOW_WORKERS = 15
+MATCHUP_CACHE_PATH = 'matchup_cache.pkl'  # Set to None to disable matchup bias
+from config import TRAINER_NAME
 
 _STUCK_TIMEOUT  = 30.0   # seconds of no output before declaring stuck
 _MAX_MISMATCHES = 10     # faint mismatch prints before declaring stuck (100 attempts each = 1000 total)
@@ -84,9 +86,10 @@ def run_battle_test(savestate_name: str, config: dict | None = None) -> BattleRe
     Returns:
         Completed BattleRecord with assertions run and logs saved.
     """
-    cfg             = config or {}
-    shallow_workers = cfg.get('shallow_workers', SHALLOW_WORKERS)
-    test_actions    = cfg.get('test_actions', None)
+    cfg                = config or {}
+    shallow_workers    = cfg.get('shallow_workers', SHALLOW_WORKERS)
+    test_actions       = cfg.get('test_actions', None)
+    matchup_cache_path = cfg.get('matchup_cache_path', MATCHUP_CACHE_PATH)
 
     savestate_path = os.path.join(_SAVESTATE_DIR, f'{savestate_name}.state')
 
@@ -132,6 +135,8 @@ def run_battle_test(savestate_name: str, config: dict | None = None) -> BattleRe
             shallow_workers=shallow_workers,
             test_actions=test_actions,
             recorder=record,
+            matchup_cache_path=matchup_cache_path,
+            trainer_name=TRAINER_NAME,
         ),
         daemon=True,
     )
@@ -223,7 +228,7 @@ def run_battle_test(savestate_name: str, config: dict | None = None) -> BattleRe
 
 
 def main():
-    savestate = sys.argv[1] if len(sys.argv) > 1 else 'WattsonTest2'
+    savestate = sys.argv[1] if len(sys.argv) > 1 else 'WattsonTest3'
     run_number = 0
     while True:
         run_number += 1

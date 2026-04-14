@@ -55,6 +55,13 @@ PLAYER_PARTY_ADDR       = 0x020244EC
 # gPlayerPartyCount: u8
 PLAYER_PARTY_COUNT_ADDR = 0x020244E9
 
+# ─── ROM base stats table (Pokémon Emerald US v1.0) ──────────────────────────
+# Used to look up the growth-rate group when computing box Pokémon levels from EXP.
+BASE_STATS_ROM  = 0x083203CC  # gBaseStats[] ROM address
+BASE_STATS_SIZE = 28           # bytes per entry
+GENDER_RATIO_OFF = 16          # byte offset of genderRatio within a base stats entry
+EXP_GROUP_OFF   = 19           # byte offset of expGroup within a base stats entry
+
 # ─── PC box storage ───────────────────────────────────────────────────────────
 # gPokemonStoragePtr: stable IWRAM pointer that always holds the current EWRAM address
 # of PokemonStorage. Emerald's DMA randomization shifts save blocks in EWRAM on every
@@ -383,6 +390,7 @@ def _read_party(core, base_addr: int) -> tuple[list, bool]:
             continue
         if p['species'] == 0 or p['species'] > MAX_VALID_SPECIES:
             continue
+        p['gender'] = _gender_from_pid(p['pid'], p['species'], core)
         team.append(p)
     return team, all_valid
 
@@ -545,8 +553,10 @@ def to_showdown(
         for mid in pkmn['moves'] if mid != 0
     ]
 
+    gender = pkmn.get('gender', '')
+    gender_str = f" ({gender})" if gender else ''
     lines = []
-    lines.append(f"{name} @ {item}" if item else name)
+    lines.append(f"{name}{gender_str} @ {item}" if item else f"{name}{gender_str}")
     lines.append(f"Ability: {ability}")
     lines.append(f"Level: {pkmn['level']}")
     if ev_parts:
@@ -560,6 +570,89 @@ def to_showdown(
 
 
 # ─── Box Pokémon helpers ──────────────────────────────────────────────────────
+
+def _gender_from_pid(pid: int, species: int, core) -> str:
+    """Return 'M', 'F', or '' (genderless) for a Pokémon given its PID and species.
+
+    Reads the genderRatio byte from gBaseStats[species] in ROM and applies the
+    standard Gen 3 formula:
+      255 → genderless ('')
+      254 → always female ('F')
+        0 → always male ('M')
+      else → 'F' if (pid & 0xFF) < genderRatio, otherwise 'M'
+    """
+    try:
+        ratio = int(core.memory.u8[BASE_STATS_ROM + species * BASE_STATS_SIZE + GENDER_RATIO_OFF])
+    except Exception:
+        return ''
+    if ratio == 255:
+        return ''
+    if ratio == 254:
+        return 'F'
+    if ratio == 0:
+        return 'M'
+    return 'F' if (pid & 0xFF) < ratio else 'M'
+
+
+def _min_exp_for_level(group: int, level: int) -> int:
+    """Minimum cumulative EXP for a given level under each Gen 3 growth-rate group.
+
+    group: 0=Medium Fast, 1=Erratic, 2=Fluctuating, 3=Medium Slow, 4=Fast, 5=Slow
+    """
+    n = level
+    if n <= 0:
+        return 0
+    n2 = n * n
+    n3 = n2 * n
+    if group == 0:   # Medium Fast
+        return n3
+    elif group == 1: # Erratic
+        if n <= 50:
+            return (n3 * (100 - n)) // 50
+        elif n <= 68:
+            return (n3 * (150 - n)) // 100
+        elif n <= 98:
+            return (n3 * ((1911 - 10 * n) // 3)) // 500
+        else:
+            return (n3 * (160 - n)) // 100
+    elif group == 2: # Fluctuating
+        if n <= 15:
+            return (n3 * (((n + 1) // 3) + 24)) // 50
+        elif n <= 35:
+            return (n3 * (n + 14)) // 50
+        else:
+            return (n3 * ((n // 2) + 32)) // 50
+    elif group == 3: # Medium Slow
+        return max(0, (6 * n3 - 75 * n2 + 500 * n - 700) // 5)
+    elif group == 4: # Fast
+        return (4 * n3) // 5
+    elif group == 5: # Slow
+        return (5 * n3) // 4
+    return n3
+
+
+def _correct_level_from_exp(species: int, exp: int, core) -> int:
+    """Compute the exact level for a box Pokémon by reading its growth-rate group from ROM.
+
+    Reads the expGroup byte from gBaseStats[species] and binary-searches for the
+    highest level L where _min_exp_for_level(group, L) <= exp.
+    Falls back to the Medium Fast approximation if the ROM read fails.
+    """
+    try:
+        group = int(core.memory.u8[BASE_STATS_ROM + species * BASE_STATS_SIZE + EXP_GROUP_OFF])
+    except Exception:
+        group = 0  # Medium Fast fallback
+    if exp <= 0:
+        return 1
+    lo, hi = 1, 100
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _min_exp_for_level(group, mid) <= exp:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
 
 def _level_from_exp(exp: int) -> int:
     """Approximate level from experience using the Medium Fast growth rate (level = cbrt(exp)).
@@ -717,6 +810,8 @@ def read_player_box(core) -> list:
             raw    = block[offset : offset + BOX_POKEMON_SIZE]
             pkmn   = decrypt_box_pokemon(raw)
             if pkmn is not None:
+                pkmn['level'] = _correct_level_from_exp(pkmn['species'], pkmn['exp'], core)
+                pkmn['gender'] = _gender_from_pid(pkmn['pid'], pkmn['species'], core)
                 box_slots.append(pkmn)
         if box_slots:
             print(f"[box_diag] Box {b+1}: {len(box_slots)} Pokémon found")
@@ -836,7 +931,8 @@ def dump_ram(core, dump_file: str = RAM_DUMP_FILE) -> None:
     print(f"[emerald_reader] EWRAM dumped ({EWRAM_SIZE // 1024} KB) to {dump_file}")
 
 
-def log_team(team: list, log_file: str = LOG_FILE) -> None:
+def log_team(team: list, log_file: str = LOG_FILE,
+             trainer_name: str | None = None) -> None:
     """
     Format a team (from read_enemy_team) as a Showdown export and write to log_file.
     Loads the JSON lookup tables from the paths defined at module level.
@@ -852,8 +948,10 @@ def log_team(team: list, log_file: str = LOG_FILE) -> None:
     ]
 
     timestamp = datetime.now().isoformat(timespec='seconds')
+    trainer_line = f"# Trainer: {trainer_name}\n" if trainer_name else ""
     output = (
         f"# Opponent team — captured {timestamp}\n"
+        f"{trainer_line}"
         f"# {len(team)} Pokémon\n\n"
         + '\n\n'.join(entries)
         + '\n'

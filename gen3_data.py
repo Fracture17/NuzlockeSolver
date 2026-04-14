@@ -137,6 +137,20 @@ _NAME_EFFECTS: dict[str, MoveEffect] = {
     "flatter":      MoveEffect.FLATTER,
     "teeterdance":  MoveEffect.TEETER_DANCE,
 
+    # --- Double-stage single-stat boosts ---
+    "swordsdance":  MoveEffect.ATK_UP_2,
+    "agility":      MoveEffect.SPE_UP_2,
+    "barrier":      MoveEffect.DEF_UP_2,
+    "irondefense":  MoveEffect.DEF_UP_2,
+    "amnesia":      MoveEffect.SPD_UP_2,
+    "tailglow":     MoveEffect.SPA_UP_2,
+    "doubleteam":   MoveEffect.EVA_UP_2,
+
+    # --- Standalone volatile/type effects ---
+    "minimize":     MoveEffect.MINIMIZE,
+    "defensecurl":  MoveEffect.DEFENSE_CURL,
+    "camouflage":   MoveEffect.CAMOUFLAGE,
+
     # --- Multi-stat raise ---
     "bulkup":       MoveEffect.BULK_UP,
     "calmmind":     MoveEffect.CALM_MIND,
@@ -237,6 +251,16 @@ _SINGLE_RAISE_MAP: dict[str, MoveEffect] = {
     "evasion":  MoveEffect.EVA_UP,
 }
 
+_DOUBLE_RAISE_MAP: dict[str, MoveEffect] = {
+    "atk":      MoveEffect.ATK_UP_2,
+    "def":      MoveEffect.DEF_UP_2,
+    "spa":      MoveEffect.SPA_UP_2,
+    "spd":      MoveEffect.SPD_UP_2,
+    "spe":      MoveEffect.SPE_UP_2,
+    "accuracy": MoveEffect.ACC_UP_2,
+    "evasion":  MoveEffect.EVA_UP_2,
+}
+
 _SINGLE_LOWER_MAP: dict[str, MoveEffect] = {
     "atk":      MoveEffect.ATK_DOWN,
     "def":      MoveEffect.DEF_DOWN,
@@ -245,6 +269,16 @@ _SINGLE_LOWER_MAP: dict[str, MoveEffect] = {
     "spe":      MoveEffect.SPE_DOWN,
     "accuracy": MoveEffect.ACC_DOWN,
     "evasion":  MoveEffect.EVA_DOWN,
+}
+
+_DOUBLE_LOWER_MAP: dict[str, MoveEffect] = {
+    "atk":      MoveEffect.ATK_DOWN_2,
+    "def":      MoveEffect.DEF_DOWN_2,
+    "spa":      MoveEffect.SPA_DOWN_2,
+    "spd":      MoveEffect.SPD_DOWN_2,
+    "spe":      MoveEffect.SPE_DOWN_2,
+    "accuracy": MoveEffect.ACC_DOWN_2,
+    "evasion":  MoveEffect.EVA_DOWN_2,
 }
 
 # ---------------------------------------------------------------------------
@@ -378,14 +412,18 @@ def _effect_from_fields(mid: str, d: dict) -> MoveEffect:
         if all_negative and boost_keys == {"atk", "spa"}:
             return MoveEffect.MEMENTO  # memento is handled by name, but just in case
 
-        # Single-stat changes
+        # Single-stat changes — distinguish ±1 (single stage) from ±2 (double stage)
         if len(boost_keys) == 1:
             stat = next(iter(boost_keys))
             val = boosts[stat]
-            if val > 0:
+            if val >= 2:
+                return _DOUBLE_RAISE_MAP.get(stat, MoveEffect.NONE)
+            elif val == 1:
                 return _SINGLE_RAISE_MAP.get(stat, MoveEffect.NONE)
-            else:
+            elif val == -1:
                 return _SINGLE_LOWER_MAP.get(stat, MoveEffect.NONE)
+            else:  # val <= -2
+                return _DOUBLE_LOWER_MAP.get(stat, MoveEffect.NONE)
 
     return MoveEffect.NONE
 

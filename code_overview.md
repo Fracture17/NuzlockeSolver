@@ -10,8 +10,9 @@ Contains function/variable/file names but no explicit code.
 Core battle simulation helpers.  MCTS classes and `play_game` were removed; only
 stateless helpers remain.
 
-**`_pick_opponent_action(state)`**
+**`_pick_opponent_action(state, active_flags=None)`**
 - Module-level function selecting the opponent's action each turn
+- `active_flags` forwarded to `select_move_with_ai_flags`; defaults to `[0, 1, 2]` when None
 - If `state["p2_moves"]` is present: calls `select_move_with_ai_flags` for player 2,
   falls back to first move if scoring returns None
 - If `state["p2_switches"]` is present: calls `select_switch_in` for player 2
@@ -21,7 +22,16 @@ stateless helpers remain.
 **`can_player_switch(state)`**
 - Returns True if voluntary switching is allowed this turn
 - Condition 1: opponent's active pokemon has `activeTurns == 1` (just switched in)
-- Condition 2: any value in `state["p2_dmg_calcs"]` >= player active pokemon's HP
+- Condition 2: any value in `state["p2_dmg_calcs"]` >= player active pokemon's HP (normal KO threat)
+- Condition 3: `state["p2_crit_dmg_calcs_bench"]` is present (crit KO threat on active)
+- Use `get_voluntary_switches` to also filter out crit-unsafe targets
+
+**`get_voluntary_switches(state, p1_switches)`**
+- Returns the filtered list of switches that are safe to make voluntarily this turn
+- Opp just switched in → all switches
+- Normal-hit KO threat → all switches
+- Crit-hit KO threat only (`p2_crit_dmg_calcs_bench` present) → switches where bench pokemon HP > max crit damage for that slot; slot key = `str(int("switch N".split()[1]) - 1)`
+- No threat → empty list
 - Reads `state["battle"]["sides"]` for active pokemon info
 
 **`simulate_turn(ipc, state, p1_action, p2_action, flags=None)`**
@@ -30,6 +40,7 @@ stateless helpers remain.
 - Captures 6 chance fields from the raw response: `p1/p2CritChance`, `p1/p2AccuracyChance`, `p1/p2SecondaryChance`
 - Runs forced-switch auto-advance loop (flags intentionally omitted — no attack)
 - Attaches all 6 as `p1/p2_crit_chance`, `p1/p2_accuracy_chance`, `p1/p2_secondary_chance` (float or None) to the returned state dict
+- Propagates `opp_items_remaining`, `opp_items_initial`, `opp_item_ps_id`, `opp_ai_flags` from parent state to result state; decrements `opp_items_remaining` if `p2_action` starts with `'item '`
 - Used by `battle_mode._simulate_and_reconcile` and `shallow_search._run_group`
 
 **`get_opponent_move_weights(state, n_samples=100)`**
@@ -53,6 +64,56 @@ stateless helpers remain.
 
 ---
 
+## ai_flags.py
+
+Gen 3 trainer AI flag scoring.
+
+**`MoveEffect` enum**
+- 150+ entries covering all Gen 3 move effect categories
+- Single-stage boosts: `ATK_UP` … `EVA_UP`; double-stage: `ATK_UP_2` … `EVA_UP_2`
+- Single-stage drops: `ATK_DOWN` … `EVA_DOWN`; double-stage: `ATK_DOWN_2` … `EVA_DOWN_2`
+- Standalone effects: `MINIMIZE`, `DEFENSE_CURL`, `CAMOUFLAGE`
+- Combined multi-stat: `BULK_UP`, `CALM_MIND`, `COSMIC_POWER`, `DRAGON_DANCE`, `CURSE`, `TICKLE`
+
+**`SETUP_FIRST_TURN_EFFECTS`** (flag 3 set)
+- Matches `AI_SetupFirstTurn_SetupEffectsToEncourage` in pokeemerald exactly
+- Includes all single/double-stage stat boosts and drops, screens, status, confusion, misc setup
+
+**`RISKY_EFFECTS`** (flag 4 set)
+- Matches `AI_Risky_EffectsToEncourage` in pokeemerald exactly
+- `HIGH_CRITICAL` handled via `ctx.move.is_high_crit` in `apply_flag4` (not an enum entry)
+
+**`apply_flag3(ctx, rng)`**
+- +2 with **176/256** probability on first battle turn for setup moves
+- (pokeemerald `if_random_less_than 80` means score when random ≥ 80 → 176/256)
+
+**`apply_flag4(ctx, rng)`**
+- +2 with 128/256 probability for risky moves OR moves with `is_high_crit`
+
+**`score_move(ctx, active_flags, rng)`**
+- Dispatches to `apply_flag0` … `apply_flag4` (flag 7 still commented out)
+- Flags 3 and 4 are now active (enabled 2026-04-11)
+
+---
+
+## gen3_data.py
+
+Move data loader and `MoveInfo` builder.
+
+**`_DOUBLE_RAISE_MAP` / `_DOUBLE_LOWER_MAP`**
+- Parallel to `_SINGLE_RAISE_MAP`/`_SINGLE_LOWER_MAP` for ±2 single-stat boosts/drops
+- Used by `_effect_from_fields` when `abs(boost_value) >= 2`
+
+**`_NAME_EFFECTS` additions**
+- `swordsdance` → `ATK_UP_2`, `agility` → `SPE_UP_2`, `barrier`/`irondefense` → `DEF_UP_2`
+- `amnesia` → `SPD_UP_2`, `tailglow` → `SPA_UP_2`, `doubleteam` → `EVA_UP_2`
+- `minimize` → `MINIMIZE`, `defensecurl` → `DEFENSE_CURL`, `camouflage` → `CAMOUFLAGE`
+
+**`_effect_from_fields` boost handler**
+- `abs(val) >= 2` → double map; `abs(val) == 1` → single map (was always single before)
+
+---
+
 ## search_process.py
 
 Subprocess wrapper for the shallow-search server.  Imports only stdlib — safe to import
@@ -66,7 +127,8 @@ from normal CPython without pulling in free-threaded code.
 - Long-lived subprocess running `python3.14t shallow_search.py` with `PYTHON_GIL=0`
 - `verbose: bool = True` parameter — `False` passes `stderr=subprocess.DEVNULL`
   to suppress per-turn diagnostics (used by MatchupInfo analysis runs)
-- `search(state) -> str` — sends `{node_script, state, num_workers}`, returns best action
+- `matchup_cache_path: str | None = None` — forwarded to subprocess in every request dict
+- `search(state) -> str` — sends `{node_script, state, num_workers, matchup_cache}`, returns best action
 - `_read_exact`, `close` — standard subprocess IPC helpers
 
 ---
@@ -76,9 +138,16 @@ from normal CPython without pulling in free-threaded code.
 Live battle orchestration.  All MCTS logic removed; `decision_fn` (shallow search) is
 the only search path.
 
+**`_flags_for_trainer(name)`**
+- Maps trainer name (case-insensitive) to opponent AI flag list
+- `'Winona'` → `[0, 1, 2, 4]`; `'Sidney'` → `[0, 1, 2, 3]`; None/unrecognised → `[0, 1, 2]`
+
 **`BattleResources`** (NamedTuple)
-- Fields: `ipc`, `decision_fn`, `test_actions`, `test_action_idx`
+- Fields: `ipc`, `decision_fn`, `test_actions`, `test_action_idx`, `opp_ai_flags`, `opp_items`, `opp_item_ps_id`
 - `decision_fn`: callable `(ipc, state) -> str`; defaults to `lambda _ipc, state: shallow_proc.search(state)`
+- `opp_ai_flags`: AI flag list for the opponent, set by `_flags_for_trainer(trainer_name)` at startup
+- `opp_items`: count of healing items the opponent has; read from `OPP_ITEMS` in `config.py`
+- `opp_item_ps_id`: PS item ID string; read from `APPROVED_OPPONENT_ITEMS` in `config.py`
 - `mcts_proc` and `mcts_iterations` removed
 
 **`_run_decision_fn(res, state, known_p2, label)`**
@@ -99,17 +168,30 @@ the only search path.
   `available[0]` and prints a warning
 
 **`_build_p2_action(res, state)`**
-- Calls `_pick_opponent_action(state.ps_state)` for opponent move/switch selection
+- Calls `_pick_opponent_action(state.ps_state, res.opp_ai_flags)` — flags flow from trainer name
 - Used to construct the pre-computed opponent action before player decision
 
 **`_simulate_and_reconcile(ipc, state, p1_action, ...)`**
-- Calls `_pick_opponent_action(new_state)` for opponent action during simulation
+- Calls `_pick_opponent_action(new_state)` for opponent action during simulation (default flags)
 
-**`run_battle_loop(..., shallow_workers=30)`**
-- Removed `mcts_iterations` and `num_workers` params
-- Creates `ShallowSearchProcess(node_script_path, num_workers=shallow_workers)`
+**`_init_ps_battle(res, state, ...)`**
+- After PS battle init, injects `opp_items_remaining`, `opp_items_initial`, `opp_item_ps_id` into `ps_state` when `res.opp_items > 0` and `res.opp_item_ps_id` is set
+
+**`run_battle_loop(..., shallow_workers=30, matchup_cache_path=None, trainer_name=None)`**
+- `trainer_name`: e.g. `'Winona'` or `'Sidney'`; computes `opp_ai_flags` via `_flags_for_trainer`
+- Reads `OPP_ITEMS` and `APPROVED_OPPONENT_ITEMS` from `config.py`; passes to `BattleResources`
+- Prints `[battle_loop] Trainer: {name} → opponent AI flags {flags}` at startup
+- Creates `ShallowSearchProcess(node_script_path, num_workers=shallow_workers, matchup_cache_path=matchup_cache_path)`
 - `decision_fn` defaults to `lambda _ipc, state: shallow_proc.search(state)`
 - Closes `shallow_proc` in `finally` block alongside `ipc`
+
+**`battle_test.py` / `game_loop.py`**
+- `TRAINER_NAME` imported from `config.py` (no longer defined locally)
+
+**`config.py` constants**
+- `APPROVED_OPPONENT_ITEMS: str | None` — PS item ID the current trainer carries, or `None` to disable
+- `OPP_ITEMS: int` — number of copies of that item the trainer has (default 0)
+- `TRAINER_NAME: str | None` — current opponent trainer name (e.g. `'Winona'`, `'Sidney'`); used by F2 logging, live battle loop, and 6v6 simulation
 
 ---
 
@@ -129,8 +211,13 @@ Module-level variable: `SAMPLER_CLASS` — set to `StratifiedSampler`; swap to `
 ### Scoring / fingerprinting
 
 **`_score_state(state)`** — scores battle state from p1's perspective (HP%, faint counts, boosts)
+**`_is_switch_only(state)`** — predicate: `p1_switches` present, `p1_moves` absent, not `is_over`; used to identify forced faint-switch states that don't consume a depth slot
 **`StateFingerprint(state)`** — binned HP/PP + status/volatiles/boosts/item → hashable tuple
-**`_get_opp_weights(state)`** — returns `[(action, prob)]`; raises `RuntimeError` if no opponent actions
+**`_opp_item_threshold_met(opp_active, item_ps_id)`** — returns True if item's trigger condition is met; mirrors pokeemerald `ShouldUseItem()`: full-restore-type items fire at `hp < maxHP/4`; heal-HP items also fire when `(maxHP-hp) > healAmount` (Potion=20, Super Potion=50, Hyper Potion=200)
+
+**`_opp_reservation_allows_item(state)`** — returns True if pokeemerald's slot-based reservation allows item use; slot 0 always allowed; later slots require `validMons <= (initial - used) + 1`; counts living opponent mons from PS state
+
+**`_get_opp_weights(state)`** — returns `[(action, prob)]`; checks `opp_items_remaining` + threshold + reservation before normal move/switch scoring; reads `opp_ai_flags` from state and passes to `get_p2_move_candidates` / `_pick_opponent_action`; raises `RuntimeError` if no opponent actions
 
 ### Tree node
 
@@ -194,8 +281,16 @@ Module-level variable: `SAMPLER_CLASS` — set to `StratifiedSampler`; swap to `
 - Weighted percentile: sort by score, walk cumulative weight to threshold
 - Prints one line per T1 action to `sys.stderr`; called from `run_search` when `VARIANCE_ANALYSIS=True`
 
+**`_drain_switch_nodes(frontier, ipc_pool, depth, n_workers, is_last_turn)`**
+- Called after each `expand_turn_parallel` in `run_search`
+- Extracts switch-only nodes from the frontier (via `_is_switch_only`), re-expands them at the same depth with the same `is_last_turn`, replaces them with their children
+- Loops until no switch-only nodes remain — handles consecutive forced switches
+- Switch nodes stay in the tree (already linked as children); only the frontier is updated
+- `expand_turn_parallel` clears `node.state` after expanding, so processed nodes don't re-trigger
+
 **`expand_turn_parallel(frontier, ipc_pool, turn_num, n_workers, is_last_turn)`**
 - Task building: one task per `(node, p1_action)` with full `opp_weights` — no inner loop over opponent actions; terminal frontier nodes (`is_over=True`) have their score set via `_score_state` and are skipped (no tasks generated)
+- Node construction uses `isinstance(item, dict)` to distinguish scored float leaves from state-dict nodes (including switch-only results that bypassed scoring even at `is_last_turn=True`)
 - Parallel phase: submits `_run_group` tasks to `ThreadPoolExecutor`; collects `variance_records`
 - Calls `_print_variance_analysis(variance_records)` when records are present
 - Dedup phase: per-turn `seen: dict[fp, TurnNode]`; `parent.children[action][fp]` accumulates float weight (not integer count)
@@ -219,8 +314,12 @@ Module-level variable: `SAMPLER_CLASS` — set to `StratifiedSampler`; swap to `
 
 ### Server
 
-**`run_search(state, node_script_path, num_workers)`** — creates pool, runs `MAX_DEPTH` × `expand_turn_parallel`, calls `GetScore(root)`, prints scores, returns `root.best_action`
-**`main()`** — server loop: reads `{node_script, state, num_workers}`, writes `{action}`
+**`MATCHUP_WEIGHT = 0.3`** — scale factor for matchup cache switch bias
+**`_matchup_cache`, `_matchup_cache_path`** — module-level cache globals; reuse across requests to same path
+**`_load_matchup_cache(path) -> MatchupInfo | None`** — loads and caches a pickled `MatchupInfo`; returns None on error
+**`_apply_matchup_bias(root, state, cache)`** — biases switch action scores after `GetScore`; recomputes `root.best_action`
+**`run_search(state, node_script_path, num_workers, matchup_cache_path=None)`** — creates pool, runs `MAX_DEPTH` × `expand_turn_parallel` + `_drain_switch_nodes`, calls `GetScore(root)`, applies matchup bias, prints scores, returns `root.best_action`
+**`main()`** — server loop: reads `{node_script, state, num_workers, matchup_cache}`, writes `{action}`
 **`if __name__ == '__main__': main()`** — entry point when launched by `ShallowSearchProcess`
 
 ---
@@ -246,6 +345,20 @@ Module-level variable: `SAMPLER_CLASS` — set to `StratifiedSampler`; swap to `
 - Closes `search_proc` in `finally` block
 - Inner loop calls `_run_matchup_context(ipc, decision_fn, ...)` for all pairs
 
+**`MatchupInfo._parse_pipe_for_validation(pipe_str) -> dict`** (static)
+- Extracts `{level: int, moves: frozenset}` from a PS pipe string
+- Level at index -2 (empty → 100); moves at index 4 split by `,`
+
+**`MatchupInfo.validate_for_state(state) -> bool`**
+- Validates all p1 party pokemon against `self.box` and revealed p2 pokemon against `self.opp`
+- Checks: species lookup, level, move set; returns False on any mismatch
+
+**`MatchupInfo.get_switch_biases(state, p1_switches) -> dict[str, (float, float)]`**
+- Returns `{switch_action: (active_avg, bench_avg)}` for each switch action
+- `avg_score` averages `rawMatchupInfo[species][opp_species][None].score` over alive non-active opponents
+- Uses `self.opp` (cache roster) as ground truth for who is alive — unrevealed opponents are assumed alive; only the currently active opponent and confirmed-fainted ones (hp==0 in battle state) are excluded
+- Returns `{}` only if all non-active opponents are defeated; omits entries where any lookup fails
+
 ---
 
 ## team_analyzer.py
@@ -253,8 +366,16 @@ Module-level variable: `SAMPLER_CLASS` — set to `StratifiedSampler`; swap to `
 **`build_matchup_info(node_script_path, ...)`**
 - Calls `MatchupInfo(node_script_path, ...)` — `use_mcts` and `mcts_iterations` removed
 
-**`find_best_surviving_team(...)`**
-- Stubbed: raises `NotImplementedError("find_best_surviving_team needs redesign for shallow search (play_game removed)")`
+**`_play_full_game(ipc, search_proc, player_team_str, opp_team_str, badge_boosts, turn_limit=100)`**
+- Runs one complete simulated battle: starts via IPC, loops calling `search_proc.search(state)` → `_apply_turn` until `is_over` or `turn_limit`
+- Returns `(winner, any_p1_fainted)`; faint detected by checking `hp == 0` on p1 side at end
+
+**`find_best_surviving_team(node_script_path, matchup_info, n_games=3, num_workers=15)`**
+- Ranks all 6-pokemon teams via `build_scores` + `select_best_team` (test2.py)
+- Deduplicates teams by `(lead, frozenset(bench))`
+- For each candidate: plays `n_games` battles via `_play_full_game`; accepts first team that wins all without any p1 faint
+- Opens `NodeIPC` + `ShallowSearchProcess(verbose=False)`; closes both in `finally`
+- Returns `(score, team_tuple, assignment_dict)` or `None` if all teams fail
 
 ---
 
@@ -280,6 +401,6 @@ battle_mode._run_decision_fn(res, state, known_p2, label)
   └─ res.decision_fn(res.ipc, state.ps_state)  [= ShallowSearchProcess.search]
        [called by both _select_best_action and _select_faint_switch]
 
-can_player_switch(state)
-  └─ _get_active_pokemon, state["p2_dmg_calcs"]
+can_player_switch(state) / get_voluntary_switches(state, p1_switches)
+  └─ _get_active_pokemon, state["p2_dmg_calcs"], state["p2_crit_dmg_calcs_bench"]
 ```

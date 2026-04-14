@@ -115,6 +115,14 @@ def _parse_block(lines: list) -> str:
     if name is None:
         return None
 
+    # Strip gender suffix embedded by to_showdown and route it to the pipe gender field
+    gender = ''
+    for suffix in (' (M)', ' (F)'):
+        if name.endswith(suffix):
+            gender = suffix[-2]   # 'M' or 'F'
+            name = name[:-len(suffix)]
+            break
+
     ev_str    = _format_stat_field(evs, skip_val=0)
     iv_str    = _format_stat_field(ivs, skip_val=31)
     moves_str = ','.join(moves)
@@ -123,8 +131,8 @@ def _parse_block(lines: list) -> str:
     level_str = level_str or '100'
 
     # PS packed format: nickname|species|item|ability|moves|nature|evs|gender|ivs|shiny|level|
-    # species left empty — PS infers from nickname; gender/shiny omitted
-    return f"{name}||{item}|{ability}|{moves_str}|{nature}|{ev_str}||{iv_str}||{level_str}|"
+    # species left empty — PS infers from nickname
+    return f"{name}||{item}|{ability}|{moves_str}|{nature}|{ev_str}|{gender}|{iv_str}||{level_str}|"
 
 
 # ─── File parsers ─────────────────────────────────────────────────────────────
@@ -208,16 +216,111 @@ def build_matchup_info(node_script_path: str, level_multiplier: float = 1.0,
 
 # ─── Team selector ────────────────────────────────────────────────────────────
 
+def _play_full_game(ipc, search_proc, player_team_str: str, opp_team_str: str,
+                    badge_boosts: dict, turn_limit: int = 200):
+    """Play one complete simulated battle using shallow search for p1 decisions.
+
+    Returns (winner, any_p1_fainted) where winner is 'p1', 'p2', or None,
+    and any_p1_fainted is True if any p1 Pokémon ended with hp == 0.
+    """
+    from battle_sim import parse_ipc_response
+    from MatchupInfo import _apply_turn
+    from battle_mode import _flags_for_trainer
+    from config import APPROVED_OPPONENT_ITEMS, OPP_ITEMS, TRAINER_NAME
+
+    raw = ipc.send({"new": True, "team1": player_team_str, "team2": opp_team_str,
+                    **(badge_boosts or {})})
+    state = parse_ipc_response(raw)
+    if OPP_ITEMS and APPROVED_OPPONENT_ITEMS:
+        state['opp_items_remaining'] = OPP_ITEMS
+        state['opp_items_initial']   = OPP_ITEMS
+        state['opp_item_ps_id']      = APPROVED_OPPONENT_ITEMS
+    state['opp_ai_flags'] = _flags_for_trainer(TRAINER_NAME)
+
+    turn = 0
+    while not state["is_over"] and turn < turn_limit:
+        p1_actions = state.get("p1_moves") or state.get("p1_switches")
+        if not p1_actions:
+            break
+        action = search_proc.search(state)
+        state = _apply_turn(ipc, state, action)
+        turn += 1
+
+    winner = state["winner"]
+    p1_side = state["battle"].get("sides", [{}])[0]
+    any_p1_fainted = any(p.get("hp", 0) == 0 for p in p1_side.get("pokemon", []))
+    return winner, any_p1_fainted
+
+
 def find_best_surviving_team(node_script_path: str, matchup_info,
                               n_games: int = 3,
                               num_workers: int = 15):
     """Try teams in ranked order; return first that wins n_games without any Pokémon fainting.
 
-    NOTE: This function requires redesign for shallow search and is not yet implemented.
+    Teams with the same lead and same set of non-lead members are considered identical
+    and skipped on subsequent encounters.
+
+    Prints progress as teams are tried, games are played, and results are determined.
+
+    Returns (score, team_tuple, assignment_dict) for the winning team, or None if all fail.
     """
-    raise NotImplementedError(
-        "find_best_surviving_team needs redesign for shallow search (play_game removed)"
-    )
+    from battle_sim import assemble_team_string, assemble_opponent_string, reorder_team
+    from test2 import build_scores, select_best_team
+    from search_process import ShallowSearchProcess
+
+    raw_scores, _, _, opponents = build_scores(matchup_info.prunedMatchupInfo)
+    all_teams = select_best_team(matchup_info, n=10 ** 9)
+    opp_first = next(iter(matchup_info.opp))
+
+    ipc = NodeIPC(node_script_path)
+    search_proc = None
+    try:
+        search_proc = ShallowSearchProcess(node_script_path, num_workers=num_workers,
+                                           verbose=False)
+
+        tried = set()
+        rank = 0
+        for score, team, assignment in all_teams:
+            ordered = reorder_team(list(team), assignment, opponents)
+            dedup_key = (ordered[0], frozenset(ordered[1:]))
+            if dedup_key in tried:
+                continue
+            tried.add(dedup_key)
+            rank += 1
+
+            print(f"\n=== Team #{rank}  score={score} ===")
+            print(f"  Members (lead first): {', '.join(ordered)}")
+            print("  Matchup data:")
+            for p in ordered:
+                scores_str = "  ".join(
+                    f"{opp}: {raw_scores[p][opp]:+.3f}" for opp in opponents
+                )
+                print(f"    {p:<12}  {scores_str}")
+
+            player_str = assemble_team_string(ordered, matchup_info.box)
+            opp_str = assemble_opponent_string(opp_first, matchup_info.opp)
+
+            team_ok = True
+            for game_num in range(1, n_games + 1):
+                winner, any_faint = _play_full_game(ipc, search_proc, player_str, opp_str,
+                                                    matchup_info.badge_boosts)
+                if winner != 'p1' or any_faint:
+                    reason = "faint" if any_faint else "loss"
+                    print(f"  Game {game_num}: FAILED ({reason}) — moving to next team")
+                    team_ok = False
+                    break
+                print(f"  Game {game_num}: WIN — no faints")
+
+            if team_ok:
+                print(f"\n=== Selected team: {', '.join(ordered)} ===")
+                return score, team, assignment
+
+        print("\nAll teams failed.")
+        return None
+    finally:
+        if search_proc is not None:
+            search_proc.close()
+        ipc.close()
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────

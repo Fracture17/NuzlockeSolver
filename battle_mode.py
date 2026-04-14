@@ -33,7 +33,7 @@ from emerald_reader import (
     STATUS2_CONFUSION,
     STATUS2_CURSED,
 )
-from config import APPROVED_OPPONENT_ITEMS
+from config import APPROVED_OPPONENT_ITEMS, OPP_ITEMS
 from NodeIPC import NodeIPC
 from battle_sim import parse_ipc_response, _rand_battle, select_move_with_ai_flags, _pick_opponent_action
 from battle_record import BattleRecord
@@ -87,11 +87,20 @@ def _parse_block(text: str) -> str:
     lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
 
     # First line: "Name @ Item" or just "Name"
+    # to_showdown embeds gender as "(M)" or "(F)" at the end of the name; strip it out
+    # and place it in the pipe gender field so @pkmn/sim receives it correctly.
     first = lines[0]
     if ' @ ' in first:
         name, item = first.split(' @ ', 1)
     else:
         name, item = first, ''
+
+    gender = ''
+    for suffix in (' (M)', ' (F)'):
+        if name.endswith(suffix):
+            gender = suffix[-2]   # 'M' or 'F'
+            name = name[:-len(suffix)]
+            break
 
     ability = ''
     level   = '100'
@@ -141,7 +150,7 @@ def _parse_block(text: str) -> str:
     item_id = item.lower().replace(' ', '').replace('-', '').replace("'", '').replace('.', '')
 
     # name|species|item|ability|moves|nature|evs|gender|ivs|shiny|level|happiness
-    return f"{name}||{item_id}|{ability}|{moves_str}|{nature}|{evs_str}||{ivs_str}||{level}|"
+    return f"{name}||{item_id}|{ability}|{moves_str}|{nature}|{evs_str}|{gender}|{ivs_str}||{level}|"
 
 
 def _gba_team_to_pipe_strings(team: list, species_db, moves_db, items_db, abilities_db) -> list:
@@ -516,6 +525,26 @@ def _resolve_move_name(action: str, state: dict, side_idx: int) -> str | None:
     return None
 
 
+def _flags_for_trainer(name: str | None) -> list:
+    """Return the AI flag list for a given trainer name.
+
+    Winona (Gym Leader 6) uses flag 4 (AI_SCRIPT_RISKY).
+    Sidney (Elite Four)   uses flag 3 (AI_SCRIPT_SETUP_FIRST_TURN).
+    All trainers get flags 0, 1, 2 as a baseline.
+    Unrecognised or None → baseline only.
+    """
+    if name is None:
+        return [0, 1, 2]
+    key = name.lower()
+    if key == 'winona':
+        print('[ai_flags] Winona detected — using flag 4 (AI_SCRIPT_RISKY)')
+        return [0, 1, 2, 4]
+    if key == 'sidney':
+        print('[ai_flags] Sidney detected — using flag 3 (AI_SCRIPT_SETUP_FIRST_TURN)')
+        return [0, 1, 2, 3]
+    return [0, 1, 2]
+
+
 # ─── Loop state bundles ───────────────────────────────────────────────────────
 
 class BattleResources(NamedTuple):
@@ -534,6 +563,9 @@ class BattleResources(NamedTuple):
     recorder:         object
     val_log:          object
     decision_fn:      object        # callable(ipc, state)->str
+    opp_ai_flags:     list          # AI flag IDs active for the opponent trainer
+    opp_items:        int  = 0      # number of healing items the opponent has
+    opp_item_ps_id:   str  = ''     # PS item ID string (e.g. 'fullrestore', 'hyperpotion')
 
 
 @dataclass
@@ -594,11 +626,11 @@ def _build_p2_action(res: BattleResources, state: BattleLoopState,
         action = _find_opp_ps_action(opp_move_id, state.ps_state, res.moves_db)
         if action:
             return action
-        action = _pick_opponent_action(state.ps_state) or 'move 1'
+        action = _pick_opponent_action(state.ps_state, res.opp_ai_flags) or 'move 1'
         if log:
             print(f'[battle_loop] Opp move not in PS slots; ai_flags fallback: {action}')
         return action
-    action = _pick_opponent_action(state.ps_state) or 'move 1'
+    action = _pick_opponent_action(state.ps_state, res.opp_ai_flags) or 'move 1'
     if log:
         print(f'[battle_loop] No opp action detected; ai_flags fallback: {action}')
     return action
@@ -675,7 +707,7 @@ def _read_team_state_menu(res: BattleResources, state: BattleLoopState) -> tuple
             raw_item       = read_last_used_item(res.core)
             print('item', raw_item)
             opp_item = raw_item if raw_item in TRAINER_BATTLE_ITEM_IDS else 0
-            if opp_item != 0 and TRAINER_BATTLE_ITEM_PS_IDS.get(opp_item) not in APPROVED_OPPONENT_ITEMS:
+            if opp_item != 0 and TRAINER_BATTLE_ITEM_PS_IDS.get(opp_item) != APPROVED_OPPONENT_ITEMS:
                 opp_item = 0
             if state.usedItem is not None and opp_item != state.usedItem:
                 opp_item = 0
@@ -741,6 +773,10 @@ def _init_ps_battle(res: BattleResources, state: BattleLoopState,
         **(res.badge_boosts or {}),
     })
     state.ps_state = parse_ipc_response(resp)
+    if res.opp_items and res.opp_item_ps_id:
+        state.ps_state['opp_items_remaining'] = res.opp_items
+        state.ps_state['opp_items_initial']   = res.opp_items
+        state.ps_state['opp_item_ps_id']      = res.opp_item_ps_id
     print('[battle_loop] PS battle initialized.')
     if res.recorder:
         res.recorder.on_state_update('init', state.turn_number, state.ps_state)
@@ -1044,7 +1080,9 @@ def run_battle_loop(core, emu_lock, node_script_path, injected_keys,
                     shallow_workers: int = 30,
                     test_actions: list | None = None,
                     recorder: 'BattleRecord | None' = None,
-                    decision_fn=None):
+                    decision_fn=None,
+                    matchup_cache_path: str | None = None,
+                    trainer_name: str | None = None):
     """Run the full battle autonomously from the first menu detection until battle end.
 
     Polls gBattleCommunication[0] at ~30 Hz.  When not at the battle menu, injects
@@ -1054,12 +1092,15 @@ def run_battle_loop(core, emu_lock, node_script_path, injected_keys,
     HP/PP/status with GBA ground truth before running search for the new turn.
     """
     from datetime import datetime
+    opp_ai_flags = _flags_for_trainer(trainer_name)
+    print(f'[battle_loop] Trainer: {trainer_name or "unknown"} → opponent AI flags {opp_ai_flags}')
     species_db   = _load_db('gen3_species.json')
     moves_db     = _load_db('gen3_move_names.json')
     items_db     = _load_db('gen3_items.json')
     abilities_db = _load_db('gen3_abilities.json')
     ipc          = NodeIPC(node_script_path)
-    shallow_proc = ShallowSearchProcess(node_script_path, num_workers=shallow_workers)
+    shallow_proc = ShallowSearchProcess(node_script_path, num_workers=shallow_workers,
+                                        matchup_cache_path=matchup_cache_path)
     if decision_fn is None:
         decision_fn = lambda _ipc, state: shallow_proc.search(state)
     log_dir      = os.path.join(_HERE, 'test_logs')
@@ -1073,6 +1114,9 @@ def run_battle_loop(core, emu_lock, node_script_path, injected_keys,
         opp_last_move_id=opp_last_move_id, badge_boosts=badge_boosts,
         test_actions=test_actions,
         recorder=recorder, val_log=val_log, decision_fn=decision_fn,
+        opp_ai_flags=opp_ai_flags,
+        opp_items=OPP_ITEMS,
+        opp_item_ps_id=APPROVED_OPPONENT_ITEMS or '',
     )
     try:
         _run_loop(res, BattleLoopState(), injected_keys)

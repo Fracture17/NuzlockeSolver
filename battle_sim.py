@@ -78,6 +78,39 @@ def detect_winner(battle_state: dict) -> Optional[str]:
     return None
 
 
+def _filter_p1_moves(p1_moves: list, battle: dict) -> list:
+    """Remove moves from p1_moves that cannot have any effect this turn.
+
+    Currently handled:
+      Fake Out — only works on the first turn the Pokémon is active (activeTurns == 1).
+      After that it always fails, so it is removed to prevent the search from
+      wasting a turn on it.  If it is the only remaining move it is kept so
+      that the search/simulator can handle the edge case gracefully.
+    """
+    sides = battle.get("sides", [])
+    if not sides:
+        return p1_moves
+    active = next((p for p in sides[0].get("pokemon", []) if p.get("isActive")), None)
+    if active is None:
+        return p1_moves
+
+    active_turns = active.get("activeTurns", 1)
+    if active_turns <= 1:
+        return p1_moves  # first turn — Fake Out can work normally
+
+    move_slots = active.get("moveSlots", [])
+    fake_out_actions = {
+        f"move {i + 1}"
+        for i, slot in enumerate(move_slots)
+        if slot.get("id") == "fakeout"
+    }
+    if not fake_out_actions:
+        return p1_moves
+
+    filtered = [m for m in p1_moves if m not in fake_out_actions]
+    return filtered if filtered else p1_moves  # keep if it would empty the list
+
+
 def parse_ipc_response(response: dict) -> dict:
     """Convert a raw IPC response into a battle state dict.
 
@@ -103,6 +136,7 @@ def parse_ipc_response(response: dict) -> dict:
     p2_switches_str = result.get("p2Switches")
 
     p1_moves = parse_move_actions(p1_moves_str) if p1_moves_str is not None else []
+    p1_moves = _filter_p1_moves(p1_moves, battle)
     p1_switches = parse_switch_actions(p1_switches_str) if p1_switches_str is not None else []
     p2_moves = parse_move_actions(p2_moves_str) if p2_moves_str is not None else []
     p2_switches = parse_switch_actions(p2_switches_str) if p2_switches_str is not None else []
@@ -117,6 +151,14 @@ def parse_ipc_response(response: dict) -> dict:
     p1_dmg_calcs = result.get("p1DmgCalcs") or {}
     p2_dmg_calcs = result.get("p2DmgCalcs") or {}
 
+    # Crit damage calculations: max possible damage (crit hit) for active and bench
+    p2_crit_dmg_calcs       = result.get("p2CritDmgCalcs") or {}
+    p2_crit_dmg_calcs_bench = result.get("p2CritDmgCalcsBench") or {}
+
+    # Per-move accuracy / secondary chance added by Connection.js
+    p1_move_info = result.get("p1MoveInfo") or []
+    p2_move_info = result.get("p2MoveInfo") or []
+
     return {
         "battle": battle,
         "p1_moves": p1_moves,
@@ -127,6 +169,10 @@ def parse_ipc_response(response: dict) -> dict:
         "winner": winner,
         "p1_dmg_calcs": p1_dmg_calcs,
         "p2_dmg_calcs": p2_dmg_calcs,
+        "p2_crit_dmg_calcs": p2_crit_dmg_calcs,
+        "p2_crit_dmg_calcs_bench": p2_crit_dmg_calcs_bench,
+        "p1_move_info": p1_move_info,
+        "p2_move_info": p2_move_info,
     }
 
 
@@ -534,14 +580,16 @@ def get_p2_move_candidates(
     return candidates
 
 
-def _pick_opponent_action(state: dict) -> Optional[str]:
+def _pick_opponent_action(state: dict, active_flags: list = None) -> Optional[str]:
     """Select the best action for the opponent (p2) using ai_flags or switch logic.
 
     Uses ai_flags scoring for moves, select_switch_in for switches.
+    active_flags defaults to [0, 1, 2] (flags 0/1/2 only) when not specified.
     Returns None if neither moves nor switches are available.
     """
     if state["p2_moves"]:
-        scored = select_move_with_ai_flags(state, state["p2_moves"], player=2)
+        scored = select_move_with_ai_flags(state, state["p2_moves"], player=2,
+                                           active_flags=active_flags)
         return scored if scored is not None else state["p2_moves"][0]
     if state["p2_switches"]:
         return select_switch_in(state, state["p2_switches"], player=2)
@@ -551,11 +599,14 @@ def _pick_opponent_action(state: dict) -> Optional[str]:
 def can_player_switch(state: dict) -> bool:
     """Return True if the player is allowed to voluntarily switch this turn.
 
-    Switching is permitted when either:
+    Switching is permitted when any of the following hold:
     - The opponent's active Pokémon just switched in (activeTurns == 1), or
-    - The opponent can one-shot the player's active Pokémon (any p2_dmg_calcs
-      value >= the player's current active HP).
+    - The opponent can one-shot the player's active Pokémon with a normal hit
+      (any p2_dmg_calcs value >= the player's current active HP), or
+    - The opponent can one-shot the player's active Pokémon with a critical hit
+      (p2_crit_dmg_calcs_bench is present, implying a crit KO is possible).
 
+    Use get_voluntary_switches() to also filter out crit-unsafe switch targets.
     Intended for use in shallow_search.py where p1_switched_last history is
     not tracked.
     """
@@ -571,11 +622,64 @@ def can_player_switch(state: dict) -> bool:
     p1_active = _get_active_pokemon(sides[0])
     if p1_active is not None:
         p1_hp = p1_active.get("hp", 0)
-        dmg_calcs = state.get("p2_dmg_calcs", {})
-        if dmg_calcs and max(dmg_calcs.values(), default=0) >= p1_hp:
+        if state.get("p2_dmg_calcs") and max(state["p2_dmg_calcs"].values(), default=0) >= p1_hp:
             return True
 
+    if state.get("p2_crit_dmg_calcs_bench"):
+        return True
+
     return False
+
+
+def get_voluntary_switches(state: dict, p1_switches: list) -> list:
+    """Return the subset of p1_switches that are safe to make voluntarily this turn.
+
+    Three cases:
+    - Opponent just switched in, or normal-hit KO threat: all switches are allowed.
+    - Crit-hit KO threat only (p2_crit_dmg_calcs_bench present): allow switches to
+      bench Pokémon whose current HP exceeds the maximum crit damage any opponent
+      move can deal to them.  Bench slot key = str(slot_index) where slot_index =
+      int("switch N".split()[1]) - 1, matching the 0-based party array index.
+    - No threat: returns an empty list.
+    """
+    if not p1_switches:
+        return []
+
+    battle = state.get("battle", {})
+    sides = battle.get("sides", [])
+    if len(sides) < 2:
+        return []
+
+    # Opp just switched in → unrestricted
+    opp_active = _get_active_pokemon(sides[1])
+    if opp_active is not None and opp_active.get("activeTurns", 2) == 1:
+        return list(p1_switches)
+
+    # Normal-hit KO threat → unrestricted
+    p1_active = _get_active_pokemon(sides[0])
+    if p1_active is not None:
+        p1_hp = p1_active.get("hp", 0)
+        if state.get("p2_dmg_calcs") and max(state["p2_dmg_calcs"].values(), default=0) >= p1_hp:
+            return list(p1_switches)
+
+    # Crit-hit KO threat → filter to bench pokemon outside crit KO range
+    bench_calcs = state.get("p2_crit_dmg_calcs_bench")
+    if bench_calcs:
+        bench_pokemon = sides[0].get("pokemon", [])
+        safe = []
+        for switch in p1_switches:
+            slot = int(switch.split()[1]) - 1        # "switch N" → 0-based party index
+            key  = str(slot)
+            if key not in bench_calcs:
+                safe.append(switch)                  # no crit data → not in KO range
+            else:
+                poke_hp      = bench_pokemon[slot].get("hp", 0) if slot < len(bench_pokemon) else 0
+                max_crit_dmg = max(bench_calcs[key].values(), default=0)
+                if poke_hp > max_crit_dmg:
+                    safe.append(switch)
+        return safe
+
+    return []
 
 
 def simulate_turn(ipc, state: dict, p1_action: str, p2_action: Optional[str],
@@ -635,6 +739,15 @@ def simulate_turn(ipc, state: dict, p1_action: str, p2_action: Optional[str],
     new_state["p2_accuracy_chance"] = p2_accuracy_chance
     new_state["p1_secondary_chance"] = p1_secondary_chance
     new_state["p2_secondary_chance"] = p2_secondary_chance
+
+    # Propagate opponent item tracking fields from the parent state.
+    # If p2 used an item this turn, decrement the remaining count.
+    for _k in ('opp_items_remaining', 'opp_items_initial', 'opp_item_ps_id', 'opp_ai_flags'):
+        if _k in state:
+            new_state[_k] = state[_k]
+    if p2_action and str(p2_action).startswith('item ') and 'opp_items_remaining' in new_state:
+        new_state['opp_items_remaining'] = max(0, new_state['opp_items_remaining'] - 1)
+
     return new_state
 
 
