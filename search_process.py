@@ -49,8 +49,8 @@ class ShallowSearchProcess:
         self._num_workers = num_workers
         self._matchup_cache_path = matchup_cache_path
 
-    def search(self, state: dict) -> str:
-        """Run shallow search in the subprocess. Returns best action string."""
+    def search(self, state: dict) -> tuple[str, dict]:
+        """Run shallow search in the subprocess. Returns (best_action, action_scores)."""
         req  = {'node_script': self._node_script, 'state': state,
                 'num_workers': self._num_workers,
                 'matchup_cache': self._matchup_cache_path}
@@ -58,7 +58,8 @@ class ShallowSearchProcess:
         self._proc.stdin.write(struct.pack('>I', len(data)) + data)
         self._proc.stdin.flush()
         length = struct.unpack('>I', self._read_exact(4))[0]
-        return json.loads(self._read_exact(length))['action']
+        resp = json.loads(self._read_exact(length))
+        return resp['action'], resp.get('action_scores', {})
 
     def _read_exact(self, n: int) -> bytes:
         buf = b''

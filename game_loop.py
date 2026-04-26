@@ -73,7 +73,7 @@ _SAVESTATE_FILETYPES = [('Save states', '*.state'), ('All files', '*.*')]
 
 SCAN_ADDR = 0x02024744   # gEnemyParty
 MAX_VALID_SPECIES = 440   # species IDs above this after decryption are garbage
-LEVEL_CAP = 58            # Party Pokémon are capped to this level every frame
+LEVEL_CAP = 55            # Party Pokémon are capped to this level every frame
 
 # ─── Testing mode — bypass MCTS and use a fixed action sequence ───────────────
 TESTING_MODE    = False

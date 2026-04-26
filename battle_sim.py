@@ -159,6 +159,11 @@ def parse_ipc_response(response: dict) -> dict:
     p1_move_info = result.get("p1MoveInfo") or []
     p2_move_info = result.get("p2MoveInfo") or []
 
+    # Lum Berry status absorption (added by Connection.js).
+    # Each field is a status ID string (e.g. 'psn', 'confusion') or None.
+    p1_lum_blocked = result.get("p1LumBlocked")
+    p2_lum_blocked = result.get("p2LumBlocked")
+
     return {
         "battle": battle,
         "p1_moves": p1_moves,
@@ -173,6 +178,8 @@ def parse_ipc_response(response: dict) -> dict:
         "p2_crit_dmg_calcs_bench": p2_crit_dmg_calcs_bench,
         "p1_move_info": p1_move_info,
         "p2_move_info": p2_move_info,
+        "p1_lum_blocked": p1_lum_blocked,
+        "p2_lum_blocked": p2_lum_blocked,
     }
 
 
@@ -742,7 +749,8 @@ def simulate_turn(ipc, state: dict, p1_action: str, p2_action: Optional[str],
 
     # Propagate opponent item tracking fields from the parent state.
     # If p2 used an item this turn, decrement the remaining count.
-    for _k in ('opp_items_remaining', 'opp_items_initial', 'opp_item_ps_id', 'opp_ai_flags'):
+    for _k in ('opp_items_remaining', 'opp_items_initial', 'opp_item_ps_id', 'opp_ai_flags',
+               'move_lock'):
         if _k in state:
             new_state[_k] = state[_k]
     if p2_action and str(p2_action).startswith('item ') and 'opp_items_remaining' in new_state:

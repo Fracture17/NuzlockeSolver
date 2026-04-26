@@ -364,18 +364,52 @@ Module-level variable: `SAMPLER_CLASS` — set to `StratifiedSampler`; swap to `
 ## team_analyzer.py
 
 **`build_matchup_info(node_script_path, ...)`**
-- Calls `MatchupInfo(node_script_path, ...)` — `use_mcts` and `mcts_iterations` removed
+- Calls `MatchupInfo(node_script_path, ...)` — original non-variant path
 
-**`_play_full_game(ipc, search_proc, player_team_str, opp_team_str, badge_boosts, turn_limit=100)`**
-- Runs one complete simulated battle: starts via IPC, loops calling `search_proc.search(state)` → `_apply_turn` until `is_over` or `turn_limit`
-- Returns `(winner, any_p1_fainted)`; faint detected by checking `hp == 0` on p1 side at end
+**`_level_pipe(pipe, multiplier) → str`**
+- Applies level multiplier to the level field (index -2) of a PS pipe string
+
+**`VariantMatchupInfo`** (class)
+- Drop-in for `MatchupInfo`; exposes `box`, `opp`, `badge_boosts`, `prunedMatchupInfo`, `variants`, `berry_map`, `rawMatchupInfo`
+- `box`: dict `{variant_key → leveled pipe string}` (all moves already in the pipe for expanded variants)
+- `get_battle_pipe(var_key, assigned_opp) → str`: substitutes cure berry (lum variants) and/or 4 locked moves (expanded variants) before a 6v6 battle
+
+**`build_variant_matchup_info(node_script_path, level_multiplier, num_workers, num_runs)`**
+- Calls `build_variants(box_raw, AVAILABLE_ITEMS, AVAILABLE_TMS)` → `variants`
+- Applies level multiplier to each variant's pipe string → `leveled_box`
+- Runs `_run_matchup_context` for every (variant_key, opp_name) with `move_pool`, `original_moves`, `is_lum` from `VariantInfo`
+- **Expanded score correction**: sentinel results (num_runs==0) are replaced with the corresponding `orig` variant's score; all-sentinel expanded variants are discarded
+- Builds `berry_map[var_key][opp_name]` via `assign_berry` for all lum variants
+- Returns `VariantMatchupInfo`
+
+**`_print_variant_team(ordered, assignment, matchup_info)`**
+- Prints final item and move assignments for each team member after team selection
+
+**`_play_full_game(ipc, search_proc, player_team_str, opp_team_str, badge_boosts, turn_limit=200)`**
+- Runs one complete simulated battle; injects `opp_ai_flags` and item state from config
+- Returns `(winner, any_p1_fainted)`
 
 **`find_best_surviving_team(node_script_path, matchup_info, n_games=3, num_workers=15)`**
-- Ranks all 6-pokemon teams via `build_scores` + `select_best_team` (test2.py)
-- Deduplicates teams by `(lead, frozenset(bench))`
-- For each candidate: plays `n_games` battles via `_play_full_game`; accepts first team that wins all without any p1 faint
-- Opens `NodeIPC` + `ShallowSearchProcess(verbose=False)`; closes both in `finally`
+- Accepts both `MatchupInfo` and `VariantMatchupInfo` (duck-typed via `isinstance` check)
+- For variant matchups: uses `get_battle_pipe` to substitute berry/moves per team member before each 6v6 battle
+- On success with variant matchup: calls `_print_variant_team` to show final assignments
 - Returns `(score, team_tuple, assignment_dict)` or `None` if all teams fail
+
+---
+
+---
+
+## test2.py
+
+**`is_valid_team(team, assignment, variants, raw_matchup_info) → bool`**
+- Species check: no two variant keys in `team` share the same `VariantInfo.species`
+- Item check: counts usage of each `AVAILABLE_ITEMS` item tag across the team; fails if any exceeds its quantity
+- TM check: for assigned expanded members only, counts TM usage from `locked_moves` in the matchup result; fails if any TM exceeds its `AVAILABLE_TMS` quantity. Flex expanded members are skipped (locked moves unknown at team-selection time)
+- Berries (`lum`, `orig`) and non-berry items not in `AVAILABLE_ITEMS` are exempt from item counting
+
+**`select_best_team(m, n)`**
+- Now detects `VariantMatchupInfo` via `hasattr(m, 'variants')` duck-typing
+- When variants are present: calls `is_valid_team` after computing the best assignment for each team combination; skips invalid teams before adding to results
 
 ---
 

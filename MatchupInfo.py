@@ -2,14 +2,29 @@ from dataclasses import dataclass
 
 from NodeIPC import NodeIPC
 
+# Set to True to print per-turn move choice and board score during matchup battles.
+DEBUG_BATTLE_TURNS: bool = False
+
 
 @dataclass
 class MatchupResult:
     """Result from running MCTS on a single matchup context."""
     score: float        # average get_reward over num_runs MCTS searches
-    action_stats: dict  # action str → avg reward (aggregated across all runs)
+    action_stats: dict  # move id → count of times chosen
     num_runs: int
     variance: float
+    lum_statuses: list  = None  # statuses blocked by Lum Berry across all battles (or None)
+    locked_moves: list  = None  # final locked moveset for expanded variants (or None)
+    turnCounts: list = None
+    rawScores: list = None
+
+    def __repr__(self):
+        top_move = ''
+        if self.action_stats:
+            best = max(self.action_stats, key=self.action_stats.get)
+            top_move = f'  top={best}'
+        return (f"MatchupResult(score={self.score:+.3f}, runs={self.num_runs}, "
+                f"var={self.variance:.4f}{top_move})")
 
 
 @dataclass
@@ -181,11 +196,41 @@ def _apply_turn(ipc, state, p1_action):
     return simulate_turn(ipc, state, p1_action, opp_action)
 
 
+def _extract_p1_move_used(state: dict, best_action: str) -> str | None:
+    """Return the PS move ID chosen by p1 this turn, or None if not a move action."""
+    if not best_action or not best_action.startswith('move '):
+        return None
+    try:
+        slot_idx = int(best_action.split()[1]) - 1
+        slots = state['battle']['sides'][0]['pokemon'][0].get('moveSlots', [])
+        if slot_idx < len(slots):
+            return slots[slot_idx].get('id') or slots[slot_idx].get('move')
+    except (IndexError, KeyError, ValueError):
+        pass
+    return None
+
+
+def _enforce_move_lock(state: dict, locked: set[str]) -> None:
+    """Edit state in-place to restrict p1's active pokemon to only locked moves."""
+    try:
+        slots = state['battle']['sides'][0]['pokemon'][0]['moveSlots']
+        # Filter out any move not in locked; replace with placeholders if needed
+        # (PS ignores moves with no PP, so we zero out pp for unlocked moves)
+        for slot in slots:
+            move_id = slot.get('id') or slot.get('move')
+            if move_id and move_id not in locked:
+                slot['pp'] = 0
+    except (IndexError, KeyError):
+        pass
+
+
 def _run_matchup_context(ipc, decision_fn, team1, team2,
                          setup_p1, setup_p2, num_runs,
                          max_runs=8, sem_threshold=0.1,
-                         turn_limit=10, convergence_penalty=1.0,
-                         badge_boosts=None, p1_init_status=None):
+                         turn_limit=20, convergence_penalty=1.0,
+                         badge_boosts=None, p1_init_status=None,
+                         move_pool=None, original_moves=None,
+                         is_lum=True):
     """Play out battles using decision_fn until the score estimate converges.
 
     Returns MatchupResult.
@@ -205,9 +250,9 @@ def _run_matchup_context(ipc, decision_fn, team1, team2,
 
     Args:
         ipc: NodeIPC instance.
-        decision_fn: callable(state) -> str — returns best p1 action for the
-                     given battle state.  Can be shallow_proc.search or an MCTS
-                     lambda; both protocols are compatible.
+        decision_fn: callable(state) -> (str, dict) — returns (best_action, action_scores)
+                     where action_scores maps action strings to predicted scores.
+                     Provided by ShallowSearchProcess.search.
         team1: IPC team string for player.
         team2: IPC team string for opponent.
         setup_p1: Player action for setup turn (None for direct matchup).
@@ -217,11 +262,24 @@ def _run_matchup_context(ipc, decision_fn, team1, team2,
         sem_threshold: Stop early when SEM of scores drops below this value.
         turn_limit: Maximum turns per battle before forcing evaluation.
         convergence_penalty: Multiplier applied to final_sem when result did not converge.
+        move_pool: If provided and longer than 4, the full expanded move pool.
+                   The PS battle is initialized with all moves; locking is tracked here.
+        original_moves: The pokemon's original 4 moves (used to detect if locked == orig).
+        is_lum: If True, track statuses blocked by the Lum Berry each turn.
     """
     import math
     from battle_sim import parse_ipc_response
 
     scores = []
+    lum_statuses: list[str] = []
+    move_counts: dict[str, int] = {}
+
+    # Move lock tracking (persists across all battles for this matchup)
+    is_expanded = move_pool is not None and len(move_pool) > 4
+    locked: set[str] = set()
+    lock_complete = False
+
+    turnCounts = []
 
     while True:
         init_state = {"p1InitState": [{"status": p1_init_status}]} if p1_init_status else {}
@@ -233,17 +291,116 @@ def _run_matchup_context(ipc, decision_fn, team1, team2,
             data = {"battle": state["battle"], "p1": setup_p1, "p2": setup_p2}
             state = parse_ipc_response(ipc.send(data))
 
+        if DEBUG_BATTLE_TURNS:
+            print(f"  --- battle run {len(scores) + 1} ---")
         turn = 0
+        p1_turn_log: list[str] = []
+        p2_turn_log: list[str] = []
         while not state["is_over"]:
             p1_actions = state.get("p1_moves") or state.get("p1_switches")
             if not p1_actions or turn >= turn_limit:
                 break
 
-            best_action = decision_fn(state)
+            # Once lock is complete, restrict moves to the 4 locked ones
+            if is_expanded and lock_complete:
+                _enforce_move_lock(state, locked)
+
+            best_action, action_scores = decision_fn(state)
+
+            # Build move-name scores from action_scores (keyed "move N") using pre-turn slots
+            if DEBUG_BATTLE_TURNS and action_scores:
+                slots = state['battle']['sides'][0]['pokemon'][0].get('moveSlots', [])
+                named_scores = {}
+                for act, sc in action_scores.items():
+                    if act.startswith('move '):
+                        try:
+                            idx = int(act.split()[1]) - 1
+                            name = slots[idx].get('id') or slots[idx].get('move') if idx < len(slots) else act
+                        except (IndexError, ValueError):
+                            name = act
+                    else:
+                        name = act
+                    named_scores[name] = sc
+
+            # Track move usage from pre-turn state (IDs stable across turn; PP changes)
+            used_id = None
+            if best_action and best_action.startswith('move '):
+                used_id = _extract_p1_move_used(state, best_action)
+                if used_id:
+                    move_counts[used_id] = move_counts.get(used_id, 0) + 1
+            p1_turn_log.append(f"{str(turn) + ' ' + used_id or best_action:15}")
+
             state = _apply_turn(ipc, state, best_action)
             turn += 1
 
-        scores.append(matchup_reward(state))
+            # Record p2's move from post-turn lastMove
+            try:
+                last = state['battle']['sides'][1]['pokemon'][0].get('lastMove') or {}
+                raw = last.get('move', '') if isinstance(last, dict) else ''
+                p2_used = raw.strip('[').removeprefix('Move:').rstrip(']') if raw else '?'
+            except (IndexError, KeyError):
+                p2_used = '?'
+            p2_turn_log.append(f"{str(turn) + ' ' + p2_used:15}")
+
+            if DEBUG_BATTLE_TURNS:
+                post_score = matchup_reward(state)
+                scores_str = ''
+                if action_scores:
+                    scores_str = '  [' + '  '.join(
+                        f'{n}={s:.3f}' for n, s in sorted(named_scores.items(), key=lambda x: -x[1])
+                    ) + ']'
+                label = f"{best_action} ({used_id})" if used_id else best_action
+                print(f"    turn {turn}: {label}  score={post_score:.3f}{scores_str}")
+
+            # Track Lum Berry status absorptions (always print)
+            if is_lum:
+                blocked = state.get('p1_lum_blocked')
+                if blocked:
+                    lum_statuses.append(blocked)
+                    print(f"    [lum] absorbed '{blocked}' on turn {turn}, battle {len(scores) + 1}")
+
+        if turn >= turn_limit:
+            sides = state['battle'].get('sides', [{}, {}])
+            p1_mon = sides[0].get('pokemon', [{}])[0]
+            p2_mon = sides[1].get('pokemon', [{}])[0]
+            p1_name = p1_mon.get('name', 'p1')
+            p2_name = p2_mon.get('name', 'p2')
+            print(f"  [turn limit] {p1_name}: {', '.join(p1_turn_log)}")
+            print(f"  [turn limit] {p2_name}: {', '.join(p2_turn_log)}")
+            for side_label, mons in (('p1', sides[0].get('pokemon', [])),
+                                     ('p2', sides[1].get('pokemon', []))):
+                for mon in mons:
+                    name  = mon.get('name', '?')
+                    hp    = mon.get('hp', 0)
+                    maxhp = mon.get('maxhp', 1)
+                    slots = mon.get('moveSlots', [])
+                    pp_str = ', '.join(
+                        f"{s.get('id') or s.get('move', '?')}:{s.get('pp', 0)}/{s.get('maxpp', 0)}"
+                        for s in slots
+                    )
+                    print(f"  [turn limit]   {name}: {hp}/{maxhp} HP  [{pp_str}]")
+
+            # Track move usage for locking
+            if is_expanded and not lock_complete:
+                used = _extract_p1_move_used(state, best_action)
+                if used:
+                    locked.add(used)
+                    if len(locked) == 4:
+                        lock_complete = True
+                        # Check immediately: if locked == original moves, discard
+                        if original_moves and set(original_moves) == locked:
+                            return MatchupResult(
+                                score=0.0, action_stats={}, num_runs=0,
+                                variance=0.0, lum_statuses=[], locked_moves=list(locked)
+                            )
+            print()
+
+        turnCounts.append(turn)
+
+        final_score = matchup_reward(state)
+        scores.append(final_score)
+        if DEBUG_BATTLE_TURNS:
+            print(f"  --- end run {len(scores)}: final_score={final_score:.3f} ---")
         n = len(scores)
 
         if n >= max_runs:
@@ -266,8 +423,26 @@ def _run_matchup_context(ipc, decision_fn, team1, team2,
     if final_sem >= sem_threshold:
         avg_score -= convergence_penalty * final_sem
 
-    return MatchupResult(score=avg_score, action_stats={}, num_runs=len(scores),
-                         variance=round(final_sem, 4))
+    return MatchupResult(
+        score=avg_score, action_stats=move_counts, num_runs=len(scores),
+        variance=round(final_sem, 4),
+        lum_statuses=lum_statuses if is_lum else None,
+        locked_moves=list(locked) if is_expanded else None,
+        turnCounts=turnCounts,
+        rawScores=scores,
+    )
+
+
+def print_move_stats(result: 'MatchupResult', indent: str = '      ') -> None:
+    """Print move usage counts and selection rates from result.action_stats."""
+    if not result or not result.action_stats:
+        return
+    total = sum(result.action_stats.values())
+    if not total:
+        return
+    for move, count in sorted(result.action_stats.items(), key=lambda x: -x[1]):
+        rate = count / total
+        print(f"{indent}{move}: {count}x  ({rate:.1%})")
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +453,7 @@ class MatchupInfo:
     def __init__(self, node_script_path: str, level_multiplier: float = 1.0,
                  num_workers: int = 4, num_runs: int = 3,
                  max_runs: int = 8, sem_threshold: float = 0.1,
-                 turn_limit: int = 100, convergence_penalty: float = 1.0,
+                 turn_limit: int = 20, convergence_penalty: float = 1.0,
                  box_raw=None, opp_raw=None, badge_boosts=None):
         """Generate full matchup data for all BOX vs OPPONENT combinations.
 
@@ -321,10 +496,17 @@ class MatchupInfo:
                 pipe_parts = self.box[p].split('|')
                 has_guts = len(pipe_parts) > 3 and pipe_parts[3] == 'guts'
 
+                p_pipe = self.box[p]
+                p_fields = p_pipe.split('|')
+                if not p_fields[2]:
+                    moves = [m.lower().replace(' ', '').replace('-', '') for m in p_fields[4].split(',') if m]
+                    p_fields[2] = 'chestoberry' if 'rest' in moves else 'lumberry'
+                    p_pipe = '|'.join(p_fields)
+
                 for p2 in self.opp:
                     _ctx_kwargs = dict(
                         ipc=ipc, decision_fn=decision_fn,
-                        team1=self.box[p], team2=self.opp[p2],
+                        team1=p_pipe, team2=self.opp[p2],
                         setup_p1=None, setup_p2=None,
                         num_runs=num_runs,
                         max_runs=max_runs, sem_threshold=sem_threshold,
@@ -342,9 +524,16 @@ class MatchupInfo:
                         else:
                             contexts[None] = normal_result
                             print(f"{p} {p2} {normal_result}  [guts normal {normal_result.score:+.3f} >= psn {poisoned_result.score:+.3f}]")
+                        print(f"numTurns={contexts[None].turnCounts}")
+                        print(f"scores={[round(s, 2) for s in contexts[None].rawScores]}")
+                        print_move_stats(contexts[None])
                     else:
                         contexts[None] = normal_result
                         print(p, p2, contexts[None])
+                        print(f"numTurns={contexts[None].turnCounts}")
+                        print(f"scores={[round(s, 2) for s in contexts[None].rawScores]}")
+                        print_move_stats(contexts[None])
+                    print()
 
                     #Ignore switch in context for now
                     """for move_i in range(1, 5):

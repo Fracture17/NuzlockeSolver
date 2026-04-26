@@ -77,7 +77,7 @@ def _opp_reservation_allows_item(state: dict) -> bool:
     valid_mons = sum(1 for p in opp_side.get('pokemon', []) if p.get('hp', 0) > 0)
     return valid_mons <= (initial - used) + 1
 
-NUM_SAMPLES = 20
+NUM_SAMPLES = 10
 MAX_DEPTH = 2
 MATCHUP_WEIGHT: float = 0  # Scale factor applied to matchup cache switch bias
 
@@ -148,8 +148,8 @@ def _score_state(state: dict, early_win_bonus: float = 0.0) -> float:
         for p in p2_pokemon
         if p.get("isActive")
     )
-    score += numP1Boosts * .2
-    score -= numP2Boosts * .2
+    score += numP1Boosts * .3
+    score -= numP2Boosts * .3
 
     return score
 
@@ -822,6 +822,7 @@ def expand_turn_parallel(
     turn_num: int,
     n_workers: int,
     is_last_turn: bool = False,
+    numSamples = NUM_SAMPLES
 ) -> list[TurnNode]:
     """Expand one depth level in parallel.
 
@@ -858,7 +859,7 @@ def expand_turn_parallel(
         opp_weights = _get_opp_weights(node.state)
 
         for p1_action in p1_actions:
-            tasks.append((node, p1_action, opp_weights, NUM_SAMPLES))
+            tasks.append((node, p1_action, opp_weights, numSamples))
 
     # Parallel phase: run simulation groups
     raw_results      = []  # list of (parent_node, p1_action, item, fp, weight)
@@ -1197,7 +1198,7 @@ def _drain_switch_nodes(
             n for n in frontier
             if not (n.state is not None and _is_switch_only(n.state))
         ]
-        expanded = expand_turn_parallel(switch_nodes, ipc_pool, depth, n_workers, is_last_turn)
+        expanded = expand_turn_parallel(switch_nodes, ipc_pool, depth, n_workers, is_last_turn, numSamples=3)
         frontier = non_switch + expanded
 
 
@@ -1273,8 +1274,8 @@ def _apply_matchup_bias(root: 'TurnNode', state: dict, matchup_cache) -> dict:
 
 
 def run_search(state: dict, node_script_path: str, num_workers: int,
-               matchup_cache_path: str | None = None) -> str:
-    """Run MAX_DEPTH-turn parallel shallow search. Returns best action string."""
+               matchup_cache_path: str | None = None) -> tuple[str, dict]:
+    """Run MAX_DEPTH-turn parallel shallow search. Returns (best_action, action_scores)."""
     cache = _load_matchup_cache(matchup_cache_path)
     # Per-search cache status (printed before the tree expansion starts)
     if cache is not None:
@@ -1316,7 +1317,7 @@ def run_search(state: dict, node_script_path: str, num_workers: int,
         finally:
             sys.stdout = _real_stdout
 
-        return root.best_action
+        return root.best_action, root.action_scores
     finally:
         ipc_pool.close_all()
 
@@ -1349,9 +1350,9 @@ def main():
         except EOFError:
             break
         req = json.loads(_read_exact(length))
-        action = run_search(req['state'], req['node_script'], req['num_workers'],
-                            matchup_cache_path=req.get('matchup_cache'))
-        _send({'action': action})
+        action, action_scores = run_search(req['state'], req['node_script'], req['num_workers'],
+                                           matchup_cache_path=req.get('matchup_cache'))
+        _send({'action': action, 'action_scores': action_scores})
 
 
 #Put it here so it's easier to find

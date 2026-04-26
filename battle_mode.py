@@ -316,6 +316,84 @@ def _opp_ps_switch_from_slot(opp_gba_slot: int, p2_gba_order: list) -> str | Non
     return f'switch {ps_slot + 1}'
 
 
+def _pre_patch_sleep(battle: dict, gba_team: list,
+                     side_idx: int, gba_order: list) -> None:
+    """Adjust the active pokemon's statusState.time before sending state to PS.
+
+    PS Gen 3 sleep tracks remaining turns in pokemon.statusState.time.
+    It decrements by 1 each onBeforeMove and wakes the pokemon when it hits <= 0.
+
+    By reading the post-turn GBA status we know whether the pokemon woke up this
+    turn, and can set statusState.time accordingly before the simulation runs:
+      - GBA still asleep: ensure time >= 2 so PS keeps the pokemon asleep after
+        decrementing (would reach >= 1 → still asleep).
+      - GBA woke up (PS has 'slp', GBA has ''): set time = 1 so PS decrements to
+        0 and correctly simulates the wakeup.
+
+    Only the active pokemon (PS slot 0) needs patching; bench sleep does not count
+    down during a turn.
+    """
+    try:
+        ps_side = battle.get('sides', [])[side_idx]
+        ps_pkmn = (ps_side.get('pokemon') or [None])[0]
+        if not ps_pkmn or not gba_order:
+            return
+        gba_idx = gba_order[0]
+        if gba_idx >= len(gba_team):
+            return
+        gba_pkmn   = gba_team[gba_idx]
+        ps_status  = ps_pkmn.get('status', '') or ''
+        gba_status = gba_pkmn.get('status', '') or ''
+
+        if gba_status == 'slp':
+            # Still asleep after the turn — keep PS asleep during simulation
+            status_state = ps_pkmn.get('statusState') or {}
+            if (status_state.get('time') or 0) < 2:
+                ps_pkmn['statusState'] = {**status_state, 'time': 2}
+        elif ps_status == 'slp':
+            # Woke up this turn — let PS simulate the wakeup
+            status_state = ps_pkmn.get('statusState') or {}
+            ps_pkmn['statusState'] = {**status_state, 'time': 1}
+    except (IndexError, KeyError, TypeError):
+        pass
+
+
+def _pre_patch_confusion(battle: dict, side_idx: int, status2: int | None) -> None:
+    """Adjust volatiles['confusion'].time before sending state to PS.
+
+    PS tracks confusion duration in volatiles['confusion'].time, decremented
+    each onBeforeMove, removed when it reaches 0.  Adding it back as {} after
+    PS removes it would leave time=undefined, causing NaN arithmetic and
+    immediate de-confusion on the next simulation.
+
+    Uses the GBA STATUS2_CONFUSION bit (post-turn ground truth):
+      - GBA still confused: ensure time >= 2 so PS keeps it confused.
+      - GBA de-confused (PS still has it): set time = 1 so PS de-confuses.
+    """
+    if status2 is None:
+        return
+    try:
+        ps_side = battle.get('sides', [])[side_idx]
+        ps_pkmn = (ps_side.get('pokemon') or [None])[0]
+        if not ps_pkmn:
+            return
+        volatiles    = ps_pkmn.get('volatiles') or {}
+        gba_confused = bool(status2 & STATUS2_CONFUSION)
+        ps_confused  = 'confusion' in volatiles
+
+        if gba_confused:
+            conf_state = volatiles.get('confusion') or {}
+            if (conf_state.get('time') or 0) < 2:
+                ps_pkmn['volatiles'] = {**volatiles,
+                                        'confusion': {**conf_state, 'time': 2}}
+        elif ps_confused:
+            conf_state = volatiles.get('confusion') or {}
+            ps_pkmn['volatiles'] = {**volatiles,
+                                    'confusion': {**conf_state, 'time': 1}}
+    except (IndexError, KeyError, TypeError):
+        pass
+
+
 def _patch_ps_state(ps_state: dict, gba_team: list, side_idx: int,
                     gba_order: list, active_status2: int | None = None) -> None:
     """Overwrite HP, PP, status, and active volatile statuses with GBA values.
@@ -354,6 +432,35 @@ def _patch_ps_state(ps_state: dict, gba_team: list, side_idx: int,
             else:
                 volatiles.pop('curse', None)
             ps_pkmn['volatiles'] = volatiles
+
+
+def _freeze_mismatch(ps_state: dict, gba_player: list, gba_enemy: list,
+                     p1_gba_order: list, p2_gba_order: list) -> bool:
+    """Return True if either active pokemon's freeze status disagrees between PS and GBA.
+
+    Checked after the faint pattern matches and forced switches are resolved, so
+    ps_state reflects the final active pokemon.  A mismatch in either direction
+    (GBA frozen but PS thawed, or PS frozen but GBA thawed) means PS simulated
+    the wrong turn and should retry with a new RNG seed.
+    """
+    sides = ps_state['battle'].get('sides', [])
+    if len(sides) < 2:
+        return False
+    for side_idx, (gba_team, gba_order) in enumerate([(gba_player, p1_gba_order),
+                                                       (gba_enemy,  p2_gba_order)]):
+        if not gba_order:
+            continue
+        gba_idx = gba_order[0]
+        if gba_idx >= len(gba_team):
+            continue
+        ps_pokemon = sides[side_idx].get('pokemon', [])
+        if not ps_pokemon:
+            continue
+        gba_frozen = (gba_team[gba_idx].get('status', '') or '') == 'frz'
+        ps_frozen  = (ps_pokemon[0].get('status', '') or '') == 'frz'
+        if gba_frozen != ps_frozen:
+            return True
+    return False
 
 
 def _faint_diff(ps_state: dict, gba_player: list, gba_enemy: list,
@@ -424,6 +531,10 @@ def _simulate_and_reconcile(ipc, ps_state: dict, p1_action: str, p2_action: str,
         p1_gba_order[0], p1_gba_order[ps_slot] = p1_gba_order[ps_slot], p1_gba_order[0]
 
     pre_battle = ps_state['battle']
+    _pre_patch_sleep(pre_battle, gba_player, 0, p1_gba_order)
+    _pre_patch_sleep(pre_battle, gba_enemy,  1, p2_gba_order)
+    _pre_patch_confusion(pre_battle, 0, player_status2)
+    _pre_patch_confusion(pre_battle, 1, enemy_status2)
     new_state  = None
     attempt    = 0
     _mismatch_logged = False
@@ -491,6 +602,13 @@ def _simulate_and_reconcile(ipc, ps_state: dict, p1_action: str, p2_action: str,
                 _mismatch_logged = True
             if attempt % 100 == 0:
                 print(f'[battle_loop] Active mismatch: {attempt} attempts so far...')
+            continue
+        if _freeze_mismatch(new_state, gba_player, gba_enemy, p1_gba_order, p2_gba_order):
+            if not _mismatch_logged:
+                print(f'[battle_loop] Freeze status mismatch, retrying...')
+                _mismatch_logged = True
+            if attempt % 100 == 0:
+                print(f'[battle_loop] Freeze mismatch: {attempt} attempts so far...')
             continue
         break
     _patch_ps_state(new_state, gba_player, 0, p1_gba_order, active_status2=player_status2)
@@ -1102,7 +1220,7 @@ def run_battle_loop(core, emu_lock, node_script_path, injected_keys,
     shallow_proc = ShallowSearchProcess(node_script_path, num_workers=shallow_workers,
                                         matchup_cache_path=matchup_cache_path)
     if decision_fn is None:
-        decision_fn = lambda _ipc, state: shallow_proc.search(state)
+        decision_fn = lambda _ipc, state: shallow_proc.search(state)[0]
     log_dir      = os.path.join(_HERE, 'test_logs')
     os.makedirs(log_dir, exist_ok=True)
     val_log_path = os.path.join(log_dir, f'validation_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
