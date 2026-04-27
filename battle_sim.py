@@ -15,7 +15,7 @@ from ai_flags import (
     BattleContext, PokemonState, MoveInfo, PokeType, Weather, MoveCategory,
     score_move, make_rng,
 )
-from gen3_data import get_move_info
+from gen3_data import get_move_info, TYPE_MAP
 from ai_switch import select_switch_in
 
 
@@ -187,26 +187,6 @@ def parse_ipc_response(response: dict) -> dict:
 # Battle context construction from IPC state
 # ---------------------------------------------------------------------------
 
-_PS_TYPE_MAP: dict = {
-    "Normal":   PokeType.NORMAL,
-    "Fire":     PokeType.FIRE,
-    "Water":    PokeType.WATER,
-    "Grass":    PokeType.GRASS,
-    "Electric": PokeType.ELECTRIC,
-    "Ice":      PokeType.ICE,
-    "Fighting": PokeType.FIGHTING,
-    "Poison":   PokeType.POISON,
-    "Ground":   PokeType.GROUND,
-    "Flying":   PokeType.FLYING,
-    "Psychic":  PokeType.PSYCHIC,
-    "Bug":      PokeType.BUG,
-    "Rock":     PokeType.ROCK,
-    "Ghost":    PokeType.GHOST,
-    "Dragon":   PokeType.DRAGON,
-    "Dark":     PokeType.DARK,
-    "Steel":    PokeType.STEEL,
-}
-
 _PS_WEATHER_MAP: dict = {
     "RainDance": Weather.RAIN,
     "SunnyDay":  Weather.SUN,
@@ -268,125 +248,127 @@ def _parse_last_move(pokemon: dict) -> Optional[MoveInfo]:
     return get_move_info(raw.lower().replace(" ", ""))
 
 
+def _parse_hp_pct(pokemon: dict) -> int:
+    hp = pokemon.get("hp", 1)
+    maxhp = pokemon.get("maxhp", 1) or 1
+    return int(hp / maxhp * 100)
+
+
+def _parse_types(pokemon: dict) -> list:
+    return [TYPE_MAP[t] for t in pokemon.get("types", ["Normal"])
+            if t in TYPE_MAP]
+
+
+def _parse_ability(pokemon: dict) -> str:
+    ability_id = pokemon.get("ability", "")
+    return _ABILITY_NAME_MAP.get(ability_id, ability_id.title())
+
+
+def _parse_status(pokemon: dict) -> Optional[str]:
+    status_raw = pokemon.get("status", "") or ""
+    return _PS_STATUS_MAP.get(status_raw) if status_raw else None
+
+
+def _parse_moves(pokemon: dict) -> list:
+    moves = []
+    for slot in pokemon.get("moveSlots", []):
+        mi = get_move_info(slot.get("id", ""))
+        if mi is not None:
+            moves.append(mi)
+    return moves
+
+
+def _parse_gender(pokemon: dict) -> str:
+    gender_raw = pokemon.get("gender", "") or ""
+    if gender_raw == "M":
+        return "male"
+    if gender_raw == "F":
+        return "female"
+    return "genderless"
+
+
+def _parse_boosts(pokemon: dict) -> dict:
+    boosts = pokemon.get("boosts", {})
+    return {
+        "atk_stage": boosts.get("atk", 0),
+        "def_stage": boosts.get("def", 0),
+        "spa_stage": boosts.get("spa", 0),
+        "spd_stage": boosts.get("spd", 0),
+        "spe_stage": boosts.get("spe", 0),
+        "acc_stage": boosts.get("accuracy", 0),
+        "eva_stage": boosts.get("evasion", 0),
+    }
+
+
+def _parse_volatiles(pokemon: dict, side: dict, side_conditions: dict) -> dict:
+    volatiles = pokemon.get("volatiles", {}) or {}
+    stockpile_entry = volatiles.get("stockpile")
+    stockpile_count = (
+        stockpile_entry.get("level", 0) if isinstance(stockpile_entry, dict)
+        else (1 if stockpile_entry else 0)
+    )
+
+    sc = side_conditions
+    protected_consecutive = 1 if ("stall" in volatiles or "protect" in volatiles) else 0
+    has_other_pokemon = any(
+        p.get("hp", 0) > 0 and not p.get("isActive")
+        for p in side.get("pokemon", [])
+    )
+
+    return {
+        "confused":              "confusion" in volatiles,
+        "infatuated":            "attract" in volatiles,
+        "cursed":                "curse" in volatiles,
+        "stockpile_count":       stockpile_count,
+        "protected_consecutive": protected_consecutive,
+        "under_safeguard":       "safeguard" in sc,
+        "under_reflect":         "reflect" in sc,
+        "under_light_screen":    "lightscreen" in sc,
+        "under_substitute":      "substitute" in volatiles,
+        "under_ingrain":         "ingrain" in volatiles,
+        "under_focus_energy":    "focusenergy" in volatiles,
+        "under_mist":            "mist" in sc,
+        "under_nightmare":       "nightmare" in volatiles,
+        "under_perish_song":     "perishsong" in volatiles,
+        "under_leech_seed":      "leechseed" in volatiles,
+        "under_disable":         "disable" in volatiles,
+        "under_encore":          "encore" in volatiles,
+        "under_torment":         "torment" in volatiles,
+        "under_foresight":       ("foresight" in volatiles or "odorsleuth" in volatiles),
+        "under_mean_look":       ("meanlook" in volatiles or "spiderweb" in volatiles),
+        "under_lock_on":         ("lockon" in volatiles or "mindreader" in volatiles),
+        "under_attract":         "attract" in volatiles,
+        "under_yawn":            "yawn" in volatiles,
+        "under_future_sight":    "futuresight" in volatiles,
+        "imprison_active":       "imprison" in volatiles,
+        "taunted":               "taunt" in volatiles,
+        "has_other_pokemon":     has_other_pokemon,
+    }
+
+
 def _build_pokemon_state(
     pokemon: dict,
     side: dict,
     side_conditions: dict,
 ) -> PokemonState:
     """Convert an IPC pokemon dict + side conditions into a PokemonState."""
-    hp = pokemon.get("hp", 1)
-    maxhp = pokemon.get("maxhp", 1) or 1
-    hp_pct = int(hp / maxhp * 100)
-
-    types = [_PS_TYPE_MAP[t] for t in pokemon.get("types", ["Normal"])
-             if t in _PS_TYPE_MAP]
-
-    ability_id = pokemon.get("ability", "")
-    ability = _ABILITY_NAME_MAP.get(ability_id, ability_id.title())
-
-    status_raw = pokemon.get("status", "") or ""
-    status = _PS_STATUS_MAP.get(status_raw) if status_raw else None
-
-    move_slots = pokemon.get("moveSlots", [])
-    moves = []
-    for slot in move_slots:
-        mi = get_move_info(slot.get("id", ""))
-        if mi is not None:
-            moves.append(mi)
-
-    item = pokemon.get("item") or None
-    last_item = pokemon.get("lastItem") or None
-
-    gender_raw = pokemon.get("gender", "") or ""
-    if gender_raw == "M":
-        gender = "male"
-    elif gender_raw == "F":
-        gender = "female"
-    else:
-        gender = "genderless"
-
-    level = pokemon.get("set", {}).get("level", 50) if pokemon.get("set") else 50
-    speed = pokemon.get("speed", 100)
-
-    is_first_turn = pokemon.get("activeTurns", 1) == 1
-
-    boosts = pokemon.get("boosts", {})
-    atk_s  = boosts.get("atk", 0)
-    def_s  = boosts.get("def", 0)
-    spa_s  = boosts.get("spa", 0)
-    spd_s  = boosts.get("spd", 0)
-    spe_s  = boosts.get("spe", 0)
-    acc_s  = boosts.get("accuracy", 0)
-    eva_s  = boosts.get("evasion", 0)
-
-    volatiles = pokemon.get("volatiles", {}) or {}
-    stockpile_entry = volatiles.get("stockpile")
-    stockpile_count = stockpile_entry.get("level", 0) if isinstance(stockpile_entry, dict) else (1 if stockpile_entry else 0)
-
-    # Side conditions (reflect/lightscreen/safeguard/mist on this pokemon's side)
-    sc = side_conditions
-    under_reflect      = "reflect" in sc
-    under_light_screen = "lightscreen" in sc
-    under_safeguard    = "safeguard" in sc
-    under_mist         = "mist" in sc
-
-    # Protect consecutive: check if 'stall' volatile is present
-    protected_consecutive = 1 if ("stall" in volatiles or "protect" in volatiles) else 0
-
-    has_other_pokemon = any(
-        p.get("hp", 0) > 0 and not p.get("isActive")
-        for p in side.get("pokemon", [])
-    )
-
-    last_move = _parse_last_move(pokemon)
-
+    boosts    = _parse_boosts(pokemon)
+    volatiles = _parse_volatiles(pokemon, side, side_conditions)
     return PokemonState(
-        hp_pct=hp_pct,
-        types=types,
-        ability=ability,
-        status=status,
-        moves=moves,
-        held_item=item,
-        used_item=last_item,
-        level=level,
-        gender=gender,
-        speed=speed,
-        is_first_turn=is_first_turn,
-        atk_stage=atk_s,
-        def_stage=def_s,
-        spa_stage=spa_s,
-        spd_stage=spd_s,
-        spe_stage=spe_s,
-        acc_stage=acc_s,
-        eva_stage=eva_s,
-        confused="confusion" in volatiles,
-        infatuated="attract" in volatiles,
-        cursed="curse" in volatiles,
-        stockpile_count=stockpile_count,
-        protected_consecutive=protected_consecutive,
-        under_safeguard=under_safeguard,
-        under_reflect=under_reflect,
-        under_light_screen=under_light_screen,
-        under_substitute="substitute" in volatiles,
-        under_ingrain="ingrain" in volatiles,
-        under_focus_energy="focusenergy" in volatiles,
-        under_mist=under_mist,
-        under_nightmare="nightmare" in volatiles,
-        under_perish_song="perishsong" in volatiles,
-        under_leech_seed="leechseed" in volatiles,
-        under_disable="disable" in volatiles,
-        under_encore="encore" in volatiles,
-        under_torment="torment" in volatiles,
-        under_foresight=("foresight" in volatiles or "odorsleuth" in volatiles),
-        under_mean_look=("meanlook" in volatiles or "spiderweb" in volatiles),
-        under_lock_on=("lockon" in volatiles or "mindreader" in volatiles),
-        under_attract="attract" in volatiles,
-        under_yawn="yawn" in volatiles,
-        under_future_sight="futuresight" in volatiles,
-        imprison_active="imprison" in volatiles,
-        taunted="taunt" in volatiles,
-        has_other_pokemon=has_other_pokemon,
-        last_move_used=last_move,
+        hp_pct         = _parse_hp_pct(pokemon),
+        types          = _parse_types(pokemon),
+        ability        = _parse_ability(pokemon),
+        status         = _parse_status(pokemon),
+        moves          = _parse_moves(pokemon),
+        held_item      = pokemon.get("item") or None,
+        used_item      = pokemon.get("lastItem") or None,
+        level          = pokemon.get("set", {}).get("level", 50) if pokemon.get("set") else 50,
+        gender         = _parse_gender(pokemon),
+        speed          = pokemon.get("speed", 100),
+        is_first_turn  = pokemon.get("activeTurns", 1) == 1,
+        last_move_used = _parse_last_move(pokemon),
+        **boosts,
+        **volatiles,
     )
 
 

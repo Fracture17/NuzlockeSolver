@@ -1,4 +1,6 @@
+"""Matchup simulation orchestration for team analysis."""
 from dataclasses import dataclass
+import logging
 
 from NodeIPC import NodeIPC
 
@@ -292,7 +294,7 @@ def _run_matchup_context(ipc, decision_fn, team1, team2,
             state = parse_ipc_response(ipc.send(data))
 
         if DEBUG_BATTLE_TURNS:
-            print(f"  --- battle run {len(scores) + 1} ---")
+            logging.debug(f"  --- battle run {len(scores) + 1} ---")
         turn = 0
         p1_turn_log: list[str] = []
         p2_turn_log: list[str] = []
@@ -350,14 +352,14 @@ def _run_matchup_context(ipc, decision_fn, team1, team2,
                         f'{n}={s:.3f}' for n, s in sorted(named_scores.items(), key=lambda x: -x[1])
                     ) + ']'
                 label = f"{best_action} ({used_id})" if used_id else best_action
-                print(f"    turn {turn}: {label}  score={post_score:.3f}{scores_str}")
+                logging.debug(f"    turn {turn}: {label}  score={post_score:.3f}{scores_str}")
 
             # Track Lum Berry status absorptions (always print)
             if is_lum:
                 blocked = state.get('p1_lum_blocked')
                 if blocked:
                     lum_statuses.append(blocked)
-                    print(f"    [lum] absorbed '{blocked}' on turn {turn}, battle {len(scores) + 1}")
+                    logging.info(f"    [lum] absorbed '{blocked}' on turn {turn}, battle {len(scores) + 1}")
 
         if turn >= turn_limit:
             sides = state['battle'].get('sides', [{}, {}])
@@ -365,8 +367,8 @@ def _run_matchup_context(ipc, decision_fn, team1, team2,
             p2_mon = sides[1].get('pokemon', [{}])[0]
             p1_name = p1_mon.get('name', 'p1')
             p2_name = p2_mon.get('name', 'p2')
-            print(f"  [turn limit] {p1_name}: {', '.join(p1_turn_log)}")
-            print(f"  [turn limit] {p2_name}: {', '.join(p2_turn_log)}")
+            logging.info(f"  [turn limit] {p1_name}: {', '.join(p1_turn_log)}")
+            logging.info(f"  [turn limit] {p2_name}: {', '.join(p2_turn_log)}")
             for side_label, mons in (('p1', sides[0].get('pokemon', [])),
                                      ('p2', sides[1].get('pokemon', []))):
                 for mon in mons:
@@ -378,7 +380,7 @@ def _run_matchup_context(ipc, decision_fn, team1, team2,
                         f"{s.get('id') or s.get('move', '?')}:{s.get('pp', 0)}/{s.get('maxpp', 0)}"
                         for s in slots
                     )
-                    print(f"  [turn limit]   {name}: {hp}/{maxhp} HP  [{pp_str}]")
+                    logging.info(f"  [turn limit]   {name}: {hp}/{maxhp} HP  [{pp_str}]")
 
             # Track move usage for locking
             if is_expanded and not lock_complete:
@@ -393,14 +395,13 @@ def _run_matchup_context(ipc, decision_fn, team1, team2,
                                 score=0.0, action_stats={}, num_runs=0,
                                 variance=0.0, lum_statuses=[], locked_moves=list(locked)
                             )
-            print()
 
         turnCounts.append(turn)
 
         final_score = matchup_reward(state)
         scores.append(final_score)
         if DEBUG_BATTLE_TURNS:
-            print(f"  --- end run {len(scores)}: final_score={final_score:.3f} ---")
+            logging.debug(f"  --- end run {len(scores)}: final_score={final_score:.3f} ---")
         n = len(scores)
 
         if n >= max_runs:
@@ -478,9 +479,9 @@ class MatchupInfo:
 
         self.rawMatchupInfo = {p: {p2: {} for p2 in self.opp} for p in self.box}
 
-        print(f"Generating matchup info (multiplier={level_multiplier}, "
-              f"shallow_workers={num_workers}, "
-              f"min_runs={num_runs}, max_runs={max_runs}, sem_threshold={sem_threshold})...")
+        logging.info(f"Generating matchup info (multiplier={level_multiplier}, "
+                     f"shallow_workers={num_workers}, "
+                     f"min_runs={num_runs}, max_runs={max_runs}, sem_threshold={sem_threshold})...")
 
         ipc = NodeIPC(node_script_path)
         search_proc = None
@@ -520,20 +521,19 @@ class MatchupInfo:
                                                                p1_init_status='psn')
                         if poisoned_result.score > normal_result.score:
                             contexts[None] = poisoned_result
-                            print(f"{p} {p2} {poisoned_result}  [guts+psn {poisoned_result.score:+.3f} > normal {normal_result.score:+.3f}]")
+                            logging.info(f"{p} {p2} {poisoned_result}  [guts+psn {poisoned_result.score:+.3f} > normal {normal_result.score:+.3f}]")
                         else:
                             contexts[None] = normal_result
-                            print(f"{p} {p2} {normal_result}  [guts normal {normal_result.score:+.3f} >= psn {poisoned_result.score:+.3f}]")
-                        print(f"numTurns={contexts[None].turnCounts}")
-                        print(f"scores={[round(s, 2) for s in contexts[None].rawScores]}")
+                            logging.info(f"{p} {p2} {normal_result}  [guts normal {normal_result.score:+.3f} >= psn {poisoned_result.score:+.3f}]")
+                        logging.info(f"numTurns={contexts[None].turnCounts}")
+                        logging.info(f"scores={[round(s, 2) for s in contexts[None].rawScores]}")
                         print_move_stats(contexts[None])
                     else:
                         contexts[None] = normal_result
-                        print(p, p2, contexts[None])
-                        print(f"numTurns={contexts[None].turnCounts}")
-                        print(f"scores={[round(s, 2) for s in contexts[None].rawScores]}")
+                        logging.info(f"{p} {p2} {contexts[None]}")
+                        logging.info(f"numTurns={contexts[None].turnCounts}")
+                        logging.info(f"scores={[round(s, 2) for s in contexts[None].rawScores]}")
                         print_move_stats(contexts[None])
-                    print()
 
                     #Ignore switch in context for now
                     """for move_i in range(1, 5):
@@ -546,7 +546,7 @@ class MatchupInfo:
                     self.rawMatchupInfo[p][p2] = contexts
                     completed += 1
                     if completed % 10 == 0 or completed == total:
-                        print(f"  {completed}/{total} pairs done")
+                        logging.info(f"  {completed}/{total} pairs done")
         finally:
             if search_proc is not None:
                 search_proc.close()

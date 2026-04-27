@@ -388,6 +388,28 @@ _STAT_RAISE_EFFECTS: frozenset = frozenset({
     MoveEffect.EVA_UP,
 })
 
+# ---------------------------------------------------------------------------
+# RNG probability thresholds (GBA 8-bit): rng(N) = random.randint(0, 255) < N
+# Source: pokeemerald battle_ai_script_commands.c
+# ---------------------------------------------------------------------------
+_P50 = 128   # ~50%
+_P61 = 156   # ~61%
+_P69 = 176   # ~69%
+_P73 = 186   # ~73%
+_P77 = 196   # ~77%
+_P78 = 200   # ~78%
+_P80 = 206   # ~80%
+_P84 = 216   # ~84%
+_P92 = 236   # ~92%
+_P96 = 246   # ~96%
+
+# HP percent thresholds used in flag scoring
+_HP_LOW  = 30
+_HP_MID  = 50
+_HP_MID2 = 60
+_HP_HIGH = 70
+_HP_FULL = 90
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -577,271 +599,248 @@ def _has_status_move_raising(moves: list, effect: MoveEffect) -> bool:
     return any(m.effect == effect for m in moves)
 
 
-def apply_flag0(ctx: BattleContext, rng) -> int:  # noqa: C901  (complexity expected)
-    """Score adjustment from Flag 0 (bad-move filter).
+def _flag0_status_conditions(move, user, target, rng) -> Optional[int]:
+    if move.is_sound and target.ability == "Soundproof":
+        return -10
+    if move.effect == MoveEffect.SLEEP:
+        if (target.ability in ("Insomnia", "Vital Spirit")
+                or target.status is not None
+                or target.under_safeguard):
+            return -10
+    if move.effect in (MoveEffect.POISON, MoveEffect.TOXIC):
+        if (PokeType.POISON in target.types
+                or PokeType.STEEL in target.types
+                or target.ability == "Immunity"
+                or target.under_safeguard):
+            return -10
+    if move.effect == MoveEffect.PARALYZE:
+        if (is_type_immune(move.type, target)
+                or target.ability == "Limber"
+                or target.status is not None
+                or target.under_safeguard):
+            return -10
+    if move.effect == MoveEffect.WILL_O_WISP:
+        if (type_effectiveness(PokeType.FIRE, target.types) <= 0.5
+                or target.ability == "Water Veil"
+                or target.status is not None
+                or target.under_safeguard):
+            return -10
+    if move.effect == MoveEffect.DREAM_EATER:
+        if target.status != "sleep":
+            return -8
+        if is_type_immune(move.type, target):
+            return -10
+    if move.effect == MoveEffect.OHKO:
+        if target.ability == "Sturdy":
+            return -10
+        if target.level > user.level:
+            return -10
+    if move.effect in (MoveEffect.CONFUSE, MoveEffect.SWAGGER,
+                       MoveEffect.FLATTER, MoveEffect.TEETER_DANCE):
+        if target.confused:
+            return -5
+        if target.ability == "Own Tempo":
+            return -10
+        if target.under_safeguard:
+            return -10
+    return None
 
-    Returns a negative delta when the move is clearly useless, 0 otherwise,
-    or +5 for Future Sight when not already active.
-    """
+
+def _flag0_stat_changes(move, user, target, rng) -> Optional[int]:
+    if move.effect == MoveEffect.MIST:
+        if user.under_mist:
+            return -8
+    if move.effect == MoveEffect.FOCUS_ENERGY:
+        if user.under_focus_energy:
+            return -10
+    if move.effect == MoveEffect.LEECH_SEED:
+        if PokeType.GRASS in target.types:
+            return -10
+        if target.under_leech_seed:
+            return -8
+    if move.effect == MoveEffect.FUTURE_SIGHT:
+        if user.under_future_sight:
+            return -12
+        return 5
+    if move.effect == MoveEffect.HAZE:
+        # Useless if no meaningful stat changes on either side
+        no_changes = (
+            user.atk_stage == 0 and user.def_stage == 0 and
+            user.spa_stage == 0 and user.spd_stage == 0 and
+            user.spe_stage == 0 and
+            target.atk_stage == 0 and target.def_stage == 0 and
+            target.spa_stage == 0 and target.spd_stage == 0 and
+            target.spe_stage == 0
+        )
+        if no_changes:
+            return -10
+    if move.effect == MoveEffect.PSYCH_UP:
+        no_changes = (
+            target.atk_stage == 0 and target.def_stage == 0 and
+            target.spa_stage == 0 and target.spd_stage == 0 and
+            target.spe_stage == 0
+        )
+        if no_changes:
+            return -10
+    if move.effect in _STAT_RAISE_EFFECTS:
+        # Check if the corresponding stage is already maxed
+        stage = _get_user_stage(user, move.effect)
+        if stage >= 6:
+            return -10
+    if move.effect == MoveEffect.BULK_UP:
+        if user.atk_stage >= 6 and user.def_stage >= 6:
+            return -10
+    if move.effect == MoveEffect.CALM_MIND:
+        if user.spa_stage >= 6 and user.spd_stage >= 6:
+            return -10
+    if move.effect == MoveEffect.COSMIC_POWER:
+        if user.def_stage >= 6 and user.spd_stage >= 6:
+            return -10
+    if move.effect == MoveEffect.DRAGON_DANCE:
+        if user.atk_stage >= 6 and user.spe_stage >= 6:
+            return -10
+    if move.effect in _STAT_LOWER_EFFECTS:
+        stage = _get_target_stage(target, move.effect)
+        if stage <= -6:
+            return -10
+        if move.effect == MoveEffect.ATK_DOWN and target.ability == "Hyper Cutter":
+            return -10
+        if move.effect == MoveEffect.SPE_DOWN and target.ability == "Speed Boost":
+            return -10
+        if move.effect == MoveEffect.ACC_DOWN and target.ability == "Keen Eye":
+            return -10
+        if target.ability in ("Clear Body", "White Smoke"):
+            return -10
+    if move.effect == MoveEffect.TICKLE:
+        if target.atk_stage <= -6:
+            return -10
+        if target.def_stage <= -6:
+            return -8
+        if target.ability in ("Clear Body", "White Smoke"):
+            return -10
+    return None
+
+
+def _flag0_field_conditions(move, user, target, rng) -> Optional[int]:
+    if move.effect == MoveEffect.EXPLODE:
+        if target.ability == "Damp":
+            return -10
+        if is_type_immune(move.type, target):
+            return -10
+        if not user.has_other_pokemon:
+            if target.has_other_pokemon:
+                return -10
+            return -1  # neither side has backup
+    if move.effect == MoveEffect.MAGNITUDE:
+        if is_type_immune(PokeType.GROUND, target):
+            return -10
+    if move.effect == MoveEffect.ATTRACT:
+        if (user.gender == "genderless" or target.gender == "genderless"
+                or user.gender == target.gender):
+            return -10
+        if target.ability == "Oblivious":
+            return -10
+        if target.under_attract:
+            return -5
+    if move.effect == MoveEffect.NIGHTMARE:
+        if target.status != "sleep":
+            return -10
+        if target.under_nightmare:
+            return -10
+    if move.effect == MoveEffect.INGRAIN:
+        if user.under_ingrain:
+            return -10
+    if move.effect == MoveEffect.IMPRISON:
+        if user.imprison_active:
+            return -10
+    if move.effect == MoveEffect.RECYCLE:
+        if user.used_item is None:
+            return -10
+    if move.effect == MoveEffect.SUBSTITUTE:
+        if user.under_substitute:
+            return -10
+        if user.hp_pct <= 25:
+            return -10
+    if move.effect == MoveEffect.BELLY_DRUM:
+        if user.atk_stage >= 6:
+            return -10
+        if user.hp_pct <= 50:
+            return -10
+    if move.effect == MoveEffect.STOCKPILE:
+        if user.stockpile_count >= 3:
+            return -10
+    if move.effect == MoveEffect.MEAN_LOOK:
+        if target.under_mean_look:
+            return -10
+    if move.effect == MoveEffect.LOCK_ON:
+        if target.under_lock_on:
+            return -10
+    if move.effect == MoveEffect.SPIKES:
+        if not target.has_other_pokemon:
+            return -10
+    if move.effect == MoveEffect.PERISH_SONG:
+        if target.under_perish_song:
+            return -10
+    if move.effect == MoveEffect.TORMENT:
+        if target.under_torment:
+            return -10
+    if move.effect == MoveEffect.ENCORE:
+        if target.under_encore:
+            return -8
+    if move.effect == MoveEffect.DISABLE:
+        if target.under_disable:
+            return -8
+    if move.effect == MoveEffect.FORESIGHT:
+        if target.under_foresight:
+            return -10
+    if move.effect == MoveEffect.YAWN:
+        if target.under_yawn:
+            return -10
+        if target.status is not None:
+            return -10
+    if move.effect == MoveEffect.CURSE:
+        if user.atk_stage >= 6:
+            return -10
+        if user.def_stage >= 6:
+            return -8
+    return None
+
+
+def _flag0_weather_redundancy(move, user, target, ctx) -> Optional[int]:
+    if move.effect == MoveEffect.RAIN_DANCE:
+        if ctx.weather == Weather.RAIN:
+            return -8
+    if move.effect == MoveEffect.SUNNY_DAY:
+        if ctx.weather == Weather.SUN:
+            return -8
+    if move.effect == MoveEffect.SANDSTORM:
+        if ctx.weather == Weather.SAND:
+            return -8
+    if move.effect == MoveEffect.HAIL:
+        if ctx.weather == Weather.HAIL:
+            return -8
+    return None
+
+
+def apply_flag0(ctx: BattleContext, rng) -> int:
+    """Filter useless or redundant moves (Flag 0 bad-move checks)."""
     if ctx.targeting_ally:
         return 0
 
     move, user, target = ctx.move, ctx.user, ctx.target
 
-    # --- Status / power1 / discouraged branch ---
     if (move.category == MoveCategory.STATUS
             or move.is_power1
             or move.is_discouraged):
-
-        if move.is_sound and target.ability == "Soundproof":
-            return -10
-
-        if move.effect == MoveEffect.SLEEP:
-            if (target.ability in ("Insomnia", "Vital Spirit")
-                    or target.status is not None
-                    or target.under_safeguard):
-                return -10
-
-        if move.effect in (MoveEffect.POISON, MoveEffect.TOXIC):
-            if (PokeType.POISON in target.types
-                    or PokeType.STEEL in target.types
-                    or target.ability == "Immunity"
-                    or target.under_safeguard):
-                return -10
-
-        if move.effect == MoveEffect.PARALYZE:
-            if (is_type_immune(move.type, target)
-                    or target.ability == "Limber"
-                    or target.status is not None
-                    or target.under_safeguard):
-                return -10
-
-        if move.effect == MoveEffect.WILL_O_WISP:
-            if (type_effectiveness(PokeType.FIRE, target.types) <= 0.5
-                    or target.ability == "Water Veil"
-                    or target.status is not None
-                    or target.under_safeguard):
-                return -10
-
-        if move.effect == MoveEffect.DREAM_EATER:
-            if target.status != "sleep":
-                return -8
-            if is_type_immune(move.type, target):
-                return -10
-
-        if move.effect == MoveEffect.OHKO:
-            if target.ability == "Sturdy":
-                return -10
-            if target.level > user.level:
-                return -10
-
-        if move.effect in (MoveEffect.CONFUSE, MoveEffect.SWAGGER,
-                           MoveEffect.FLATTER, MoveEffect.TEETER_DANCE):
-            if target.confused:
-                return -5
-            if target.ability == "Own Tempo":
-                return -10
-            if target.under_safeguard:
-                return -10
-
-        if move.effect == MoveEffect.MIST:
-            if user.under_mist:
-                return -8
-
-        if move.effect == MoveEffect.FOCUS_ENERGY:
-            if user.under_focus_energy:
-                return -10
-
-        if move.effect == MoveEffect.LEECH_SEED:
-            if PokeType.GRASS in target.types:
-                return -10
-            if target.under_leech_seed:
-                return -8
-
-        if move.effect == MoveEffect.FUTURE_SIGHT:
-            if user.under_future_sight:
-                return -12
-            return 5
-
-        if move.effect == MoveEffect.HAZE:
-            # Useless if no meaningful stat changes on either side
-            no_changes = (
-                user.atk_stage == 0 and user.def_stage == 0 and
-                user.spa_stage == 0 and user.spd_stage == 0 and
-                user.spe_stage == 0 and
-                target.atk_stage == 0 and target.def_stage == 0 and
-                target.spa_stage == 0 and target.spd_stage == 0 and
-                target.spe_stage == 0
-            )
-            if no_changes:
-                return -10
-
-        if move.effect == MoveEffect.PSYCH_UP:
-            no_changes = (
-                target.atk_stage == 0 and target.def_stage == 0 and
-                target.spa_stage == 0 and target.spd_stage == 0 and
-                target.spe_stage == 0
-            )
-            if no_changes:
-                return -10
-
-        if move.effect in _STAT_RAISE_EFFECTS:
-            # Check if the corresponding stage is already maxed
-            stage = _get_user_stage(user, move.effect)
-            if stage >= 6:
-                return -10
-
-        if move.effect == MoveEffect.BULK_UP:
-            if user.atk_stage >= 6 and user.def_stage >= 6:
-                return -10
-
-        if move.effect == MoveEffect.CALM_MIND:
-            if user.spa_stage >= 6 and user.spd_stage >= 6:
-                return -10
-
-        if move.effect == MoveEffect.COSMIC_POWER:
-            if user.def_stage >= 6 and user.spd_stage >= 6:
-                return -10
-
-        if move.effect == MoveEffect.DRAGON_DANCE:
-            if user.atk_stage >= 6 and user.spe_stage >= 6:
-                return -10
-
-        if move.effect in _STAT_LOWER_EFFECTS:
-            stage = _get_target_stage(target, move.effect)
-            if stage <= -6:
-                return -10
-            if move.effect == MoveEffect.ATK_DOWN and target.ability == "Hyper Cutter":
-                return -10
-            if move.effect == MoveEffect.SPE_DOWN and target.ability == "Speed Boost":
-                return -10
-            if move.effect == MoveEffect.ACC_DOWN and target.ability == "Keen Eye":
-                return -10
-            if target.ability in ("Clear Body", "White Smoke"):
-                return -10
-
-        if move.effect == MoveEffect.TICKLE:
-            if target.atk_stage <= -6:
-                return -10
-            if target.def_stage <= -6:
-                return -8
-            if target.ability in ("Clear Body", "White Smoke"):
-                return -10
-
-        if move.effect == MoveEffect.EXPLODE:
-            if target.ability == "Damp":
-                return -10
-            if is_type_immune(move.type, target):
-                return -10
-            if not user.has_other_pokemon:
-                if target.has_other_pokemon:
-                    return -10
-                return -1  # neither side has backup
-
-        if move.effect == MoveEffect.MAGNITUDE:
-            if is_type_immune(PokeType.GROUND, target):
-                return -10
-
-        if move.effect == MoveEffect.ATTRACT:
-            if (user.gender == "genderless" or target.gender == "genderless"
-                    or user.gender == target.gender):
-                return -10
-            if target.ability == "Oblivious":
-                return -10
-            if target.under_attract:
-                return -5
-
-        if move.effect == MoveEffect.NIGHTMARE:
-            if target.status != "sleep":
-                return -10
-            if target.under_nightmare:
-                return -10
-
-        if move.effect == MoveEffect.INGRAIN:
-            if user.under_ingrain:
-                return -10
-
-        if move.effect == MoveEffect.IMPRISON:
-            if user.imprison_active:
-                return -10
-
-        if move.effect == MoveEffect.RECYCLE:
-            if user.used_item is None:
-                return -10
-
-        if move.effect == MoveEffect.SUBSTITUTE:
-            if user.under_substitute:
-                return -10
-            if user.hp_pct <= 25:
-                return -10
-
-        if move.effect == MoveEffect.BELLY_DRUM:
-            if user.atk_stage >= 6:
-                return -10
-            if user.hp_pct <= 50:
-                return -10
-
-        if move.effect == MoveEffect.STOCKPILE:
-            if user.stockpile_count >= 3:
-                return -10
-
-        if move.effect == MoveEffect.MEAN_LOOK:
-            if target.under_mean_look:
-                return -10
-
-        if move.effect == MoveEffect.LOCK_ON:
-            if target.under_lock_on:
-                return -10
-
-        if move.effect == MoveEffect.SPIKES:
-            if not target.has_other_pokemon:
-                return -10
-
-        if move.effect == MoveEffect.PERISH_SONG:
-            if target.under_perish_song:
-                return -10
-
-        if move.effect == MoveEffect.TORMENT:
-            if target.under_torment:
-                return -10
-
-        if move.effect == MoveEffect.ENCORE:
-            if target.under_encore:
-                return -8
-
-        if move.effect == MoveEffect.DISABLE:
-            if target.under_disable:
-                return -8
-
-        if move.effect == MoveEffect.FORESIGHT:
-            if target.under_foresight:
-                return -10
-
-        if move.effect == MoveEffect.YAWN:
-            if target.under_yawn:
-                return -10
-            if target.status is not None:
-                return -10
-
-        if move.effect == MoveEffect.CURSE:
-            if user.atk_stage >= 6:
-                return -10
-            if user.def_stage >= 6:
-                return -8
-
-        if move.effect == MoveEffect.RAIN_DANCE:
-            if ctx.weather == Weather.RAIN:
-                return -8
-        if move.effect == MoveEffect.SUNNY_DAY:
-            if ctx.weather == Weather.SUN:
-                return -8
-        if move.effect == MoveEffect.SANDSTORM:
-            if ctx.weather == Weather.SAND:
-                return -8
-        if move.effect == MoveEffect.HAIL:
-            if ctx.weather == Weather.HAIL:
-                return -8
-
+        for checker in (
+            _flag0_status_conditions,
+            _flag0_stat_changes,
+            _flag0_field_conditions,
+            lambda m, u, t, r: _flag0_weather_redundancy(m, u, t, ctx),
+        ):
+            result = checker(move, user, target, rng)
+            if result is not None:
+                return result
         return 0
 
     # --- Damaging moves (not status / power1 / discouraged) ---
@@ -893,7 +892,7 @@ def apply_flag3(ctx: BattleContext, rng) -> int:
     if ctx.targeting_ally:
         return 0
     if ctx.is_first_battle_turn and ctx.move.effect in SETUP_FIRST_TURN_EFFECTS:
-        return 2 if rng(176) else 0
+        return 2 if rng(_P69) else 0
     return 0
 
 
@@ -909,7 +908,7 @@ def apply_flag4(ctx: BattleContext, rng) -> int:
     if ctx.targeting_ally:
         return 0
     if ctx.move.effect in RISKY_EFFECTS or ctx.move.is_high_crit:
-        return 2 if rng(128) else 0
+        return 2 if rng(_P50) else 0
     return 0
 
 
@@ -976,7 +975,7 @@ def apply_flag1(ctx: BattleContext, rng) -> int:
     # 4× super-effective bonus
     effectiveness = type_effectiveness(move.type, ctx.target.types)
     if effectiveness >= 4.0:
-        if rng(176):
+        if rng(_P69):
             score += 2
 
     return score
@@ -1006,119 +1005,101 @@ _SPA_DOWN_SPEC_TYPES: frozenset = frozenset({
 })
 
 
-def apply_flag2(ctx: BattleContext, rng) -> int:  # noqa: C901
-    """Score adjustment from Flag 2 (move-viability checks).
-
-    This flag implements a large branching tree covering most move effects.
-    Returns the cumulative score delta from all matching "continue" segments
-    plus the terminal return for the matched effect block.
-    """
-    if ctx.targeting_ally:
-        return 0
-
-    move, user, target = ctx.move, ctx.user, ctx.target
+# Source: AI_CV_Sleep, AI_CV_Absorb, AI_CV_SelfKO
+def _flag2_sleep_absorb_selfko(move, user, target, ctx, rng) -> int:
     score = 0
-
-    # --- Sleep moves (AI_CV_Sleep) ---
     if move.effect == MoveEffect.SLEEP:
         # +1 if USER has Dream Eater or Nightmare to exploit the sleep.
         # Source uses if_has_move_with_effect AI_TARGET but a game bug makes it
         # check sBattler_AI (the AI's own pokemon) instead of the target.
         if any(m.effect in (MoveEffect.DREAM_EATER, MoveEffect.NIGHTMARE)
                for m in user.moves):
-            if rng(128):
+            if rng(_P50):
                 score += 1
         return score
-
-    # --- Draining moves (AI_CV_Absorb) ---
     if move.is_draining:
         eff = type_effectiveness(move.type, target.types)
-        if eff < 1.0 and rng(206):  # 80% chance -3 when resisted
+        if eff < 1.0 and rng(_P80):  # 80% chance -3 when resisted
             score -= 3
         return score
-
-    # --- Explode / Memento (AI_CV_SelfKO) ---
-    if move.effect in (MoveEffect.EXPLODE, MoveEffect.MEMENTO):
-        # Penalty if target has raised evasion
-        if target.eva_stage >= 1:
+    # EXPLODE / MEMENTO
+    if target.eva_stage >= 1:
+        score -= 1
+        if target.eva_stage >= 4 and rng(_P50):
             score -= 1
-            if target.eva_stage >= 4 and rng(128):
+    if user.hp_pct < 80 or not is_user_faster(ctx):
+        if user.hp_pct <= 50:
+            if rng(_P50):
+                score += 1
+            if user.hp_pct <= 30 and rng(_P80):
+                score += 1
+        else:
+            if rng(_P80):  # 80% chance -1 at HP 51-79%
                 score -= 1
-        # HP / speed decision
-        if user.hp_pct < 80 or not is_user_faster(ctx):
-            # Encourage low HP
-            if user.hp_pct <= 50:
-                if rng(128):
-                    score += 1
-                if user.hp_pct <= 30 and rng(206):
-                    score += 1
-            else:
-                if rng(206):  # 80% chance -1 at HP 51-79%
-                    score -= 1
-        else:  # HP >= 80% AND user faster
-            if rng(206):  # 80% chance -3
-                score -= 3
-        return score
+    else:  # HP >= 80% AND user faster
+        if rng(_P80):  # 80% chance -3
+            score -= 3
+    return score
 
-    # --- Speed boost (AI_CV_SpeedUp) ---
+
+# Source: AI_CV_Speed, AI_CV_Evasion, AI_CV_DragonDance
+def _flag2_speed_evasion_dd(move, user, target, ctx, rng) -> int:
+    score = 0
     if move.effect == MoveEffect.SPE_UP:
         if is_user_faster(ctx):
             score -= 3
-        elif rng(186):  # 73% chance +3
+        elif rng(_P73):  # 73% chance +3
             score += 3
         return score
-
-    # --- Evasion boost (AI_CV_EvasionUp) ---
     if move.effect == MoveEffect.EVA_UP:
-        if user.hp_pct >= 90 and rng(156):  # 61% +3 at high HP
+        if user.hp_pct >= 90 and rng(_P61):  # 61% +3 at high HP
             score += 3
-        if user.eva_stage >= 3 and rng(128):
+        if user.eva_stage >= 3 and rng(_P50):
             score -= 1
-        if target.status == "badly_poison" and rng(186):
+        if target.status == "badly_poison" and rng(_P73):
             score += 3
-        if target.under_leech_seed and rng(186):
+        if target.under_leech_seed and rng(_P73):
             score += 3
-        if user.under_ingrain and rng(128):
+        if user.under_ingrain and rng(_P50):
             score += 2
-        if target.cursed and rng(186):
+        if target.cursed and rng(_P73):
             score += 3
         if user.hp_pct <= 70 and user.eva_stage != 0:
             if user.hp_pct < 40 or target.hp_pct < 40:
                 score -= 2
-            elif rng(186):
+            elif rng(_P73):
                 score -= 2
         return score
+    # DRAGON_DANCE
+    if not is_user_faster(ctx):  # target faster
+        if rng(_P50):
+            score += 1
+    else:  # user faster
+        if user.hp_pct <= _HP_MID and rng(_P73):
+            score -= 1
+    return score
 
-    # --- Dragon Dance (AI_CV_DragonDance) — dedicated handler ---
-    if move.effect == MoveEffect.DRAGON_DANCE:
-        if not is_user_faster(ctx):  # target faster
-            if rng(128):
-                score += 1
-        else:  # user faster
-            if user.hp_pct <= 50 and rng(186):
-                score -= 1
-        return score
 
-    # --- Attack Up (AI_CV_AttackUp) ---
+# Source: AI_CV_AtkUp, AI_CV_DefUp, AI_CV_SpAtkUp, AI_CV_SpDefUp, AI_CV_AccUp
+def _flag2_stat_boost_single(move, user, target, ctx, rng) -> int:
+    score = 0
     if move.effect == MoveEffect.ATK_UP:
         if user.atk_stage >= 3:
-            if rng(156):
+            if rng(_P61):
                 score -= 1
-        elif user.hp_pct == 100 and rng(128):
+        elif user.hp_pct == 100 and rng(_P50):
             score += 2
         if user.hp_pct <= 70:
-            if user.hp_pct < 40 or rng(216):
+            if user.hp_pct < 40 or rng(_P84):
                 score -= 2
         return score
-
-    # --- Defense Up (AI_CV_DefenseUp) ---
     if move.effect == MoveEffect.DEF_UP:
         if user.def_stage >= 3:
-            if rng(156):
+            if rng(_P61):
                 score -= 1
-        elif user.hp_pct == 100 and rng(128):
+        elif user.hp_pct == 100 and rng(_P50):
             score += 2
-        if user.hp_pct >= 70 and rng(200):
+        if user.hp_pct >= 70 and rng(_P78):
             return score  # ~78% end with no further penalty at high HP
         # HP < 70%: check target's last move type
         if user.hp_pct < 40:
@@ -1126,85 +1107,83 @@ def apply_flag2(ctx: BattleContext, rng) -> int:  # noqa: C901
         elif target.last_move_used is not None and target.last_move_used.power > 0:
             if target.last_move_used.type not in _REFLECT_PHYSICAL_TYPES:
                 score -= 2  # special-type attack → Def Up not as useful
-            elif rng(196):
+            elif rng(_P77):
                 score -= 2
-        elif rng(196):
+        elif rng(_P77):
             score -= 2
         return score
-
-    # --- Sp. Attack Up (AI_CV_SpAtkUp) ---
     if move.effect == MoveEffect.SPA_UP:
         if user.spa_stage >= 3:
-            if rng(156):
+            if rng(_P61):
                 score -= 1
-        elif user.hp_pct == 100 and rng(128):
+        elif user.hp_pct == 100 and rng(_P50):
             score += 2
         if user.hp_pct <= 70:
-            if user.hp_pct < 40 or rng(186):
+            if user.hp_pct < 40 or rng(_P73):
                 score -= 2
         return score
-
-    # --- Sp. Defense Up (AI_CV_SpDefUp) ---
     if move.effect == MoveEffect.SPD_UP:
         if user.spd_stage >= 3:
-            if rng(156):
+            if rng(_P61):
                 score -= 1
-        elif user.hp_pct == 100 and rng(128):
+        elif user.hp_pct == 100 and rng(_P50):
             score += 2
-        if user.hp_pct >= 70 and rng(200):
+        if user.hp_pct >= 70 and rng(_P78):
             return score
         if user.hp_pct < 40:
             score -= 2
         elif target.last_move_used is not None and target.last_move_used.power > 0:
             if target.last_move_used.type in _REFLECT_PHYSICAL_TYPES:
                 score -= 2  # physical-type attack → SpDef Up not as useful
-            elif rng(196):
+            elif rng(_P77):
                 score -= 2
-        elif rng(196):
+        elif rng(_P77):
             score -= 2
         return score
+    # ACC_UP
+    if user.acc_stage >= 3 and rng(_P80):
+        score -= 2
+    if user.hp_pct <= 70:
+        score -= 2
+    return score
 
-    # --- Accuracy Up (AI_CV_AccuracyUp) ---
-    if move.effect == MoveEffect.ACC_UP:
-        if user.acc_stage >= 3 and rng(206):
-            score -= 2
-        if user.hp_pct <= 70:
-            score -= 2
-        return score
 
-    # --- Bulk Up (AI_CV_DefenseUp) ---
+# Source: AI_CV_BulkUp, AI_CV_CalmMind
+def _flag2_multi_stat_boost(move, user, target, ctx, rng) -> int:
+    score = 0
     if move.effect == MoveEffect.BULK_UP:
         stage = max(user.atk_stage, user.def_stage)
         if stage >= 3:
-            if rng(156):
+            if rng(_P61):
                 score -= 1
-        elif user.hp_pct == 100 and rng(128):
+        elif user.hp_pct == 100 and rng(_P50):
             score += 2
-        if user.hp_pct >= 70 and rng(200):
+        if user.hp_pct >= 70 and rng(_P78):
             return score
         if user.hp_pct < 40:
             score -= 2
-        elif rng(196):
+        elif rng(_P77):
             score -= 2
         return score
-
-    # --- Calm Mind / Cosmic Power (AI_CV_SpDefUp) ---
-    if move.effect in (MoveEffect.CALM_MIND, MoveEffect.COSMIC_POWER):
-        stage = max(user.spa_stage, user.spd_stage)
-        if stage >= 3:
-            if rng(156):
-                score -= 1
-        elif user.hp_pct == 100 and rng(128):
-            score += 2
-        if user.hp_pct >= 70 and rng(200):
-            return score
-        if user.hp_pct < 40:
-            score -= 2
-        elif rng(196):
-            score -= 2
+    # CALM_MIND / COSMIC_POWER
+    stage = max(user.spa_stage, user.spd_stage)
+    if stage >= 3:
+        if rng(_P61):
+            score -= 1
+    elif user.hp_pct == 100 and rng(_P50):
+        score += 2
+    if user.hp_pct >= 70 and rng(_P78):
         return score
+    if user.hp_pct < 40:
+        score -= 2
+    elif rng(_P77):
+        score -= 2
+    return score
 
-    # --- Weather Heal (AI_CV_HealWeather → AI_CV_Heal) ---
+
+# Source: AI_CV_WeatherHeal, AI_CV_Recover, AI_CV_Rest
+def _flag2_heal(move, user, target, ctx, rng) -> int:
+    score = 0
     if move.effect == MoveEffect.WEATHER_HEAL:
         if ctx.weather in (Weather.HAIL, Weather.RAIN, Weather.SAND):
             score -= 2
@@ -1214,112 +1193,112 @@ def apply_flag2(ctx: BattleContext, rng) -> int:  # noqa: C901
         elif is_user_faster(ctx):
             score -= 8
         else:
-            if user.hp_pct < 70 or rng(30):
-                if rng(236):
+            if user.hp_pct < _HP_HIGH or rng(30):
+                if rng(_P92):
                     score += 2
             else:
                 score -= 3
         return score
-
-    # --- HP-restore moves (AI_CV_Heal) ---
     if move.effect in (MoveEffect.RECOVER, MoveEffect.SOFTBOILED, MoveEffect.SWALLOW):
         if user.hp_pct == 100:
             score -= 3
         elif is_user_faster(ctx):
             score -= 8
         else:  # target faster
-            if user.hp_pct < 70 or rng(30):  # HP < 70% or 12% chance
-                if rng(236):  # 92% +2
+            if user.hp_pct < _HP_HIGH or rng(30):  # HP < 70% or 12% chance
+                if rng(_P92):  # 92% +2
                     score += 2
             else:
                 score -= 3
         return score
+    # REST
+    rest_encourage = False
+    if not is_user_faster(ctx):  # target faster
+        if user.hp_pct < _HP_MID2:
+            rest_encourage = True
+        elif user.hp_pct <= _HP_HIGH and rng(50):
+            rest_encourage = True
+    else:  # user faster
+        if user.hp_pct == 100:
+            score -= 8
+            return score
+        if user.hp_pct < 40:
+            rest_encourage = True
+        elif user.hp_pct <= _HP_MID and rng(70):
+            rest_encourage = True
+    if rest_encourage:
+        if rng(_P96):
+            score += 3
+    else:
+        score -= 3
+    return score
 
-    # --- Rest (AI_CV_Rest) ---
-    if move.effect == MoveEffect.REST:
-        rest_encourage = False
-        if not is_user_faster(ctx):  # target faster
-            if user.hp_pct < 60:
-                rest_encourage = True
-            elif user.hp_pct <= 70 and rng(50):
-                rest_encourage = True
-        else:  # user faster
-            if user.hp_pct == 100:
-                score -= 8
-                return score
-            if user.hp_pct < 40:
-                rest_encourage = True
-            elif user.hp_pct <= 50 and rng(70):
-                rest_encourage = True
-        if rest_encourage:
-            if rng(246):
-                score += 3
-        else:
-            score -= 3
-        return score
 
-    # --- Toxic / Leech Seed (AI_CV_Toxic) ---
+# Source: AI_CV_Toxic, AI_CV_Poison
+def _flag2_status_stall(move, user, target, ctx, rng) -> int:
+    score = 0
     if move.effect in (MoveEffect.TOXIC, MoveEffect.LEECH_SEED):
         has_atk = any(m.category != MoveCategory.STATUS for m in user.moves)
-        if has_atk and user.hp_pct <= 50 and rng(206):
+        if has_atk and user.hp_pct <= 50 and rng(_P80):
             score -= 3
-        if target.hp_pct <= 50 and rng(206):
+        if target.hp_pct <= 50 and rng(_P80):
             score -= 3
         has_spd_up = any(m.effect == MoveEffect.SPD_UP for m in user.moves)
         has_protect = any(m.effect == MoveEffect.PROTECT for m in user.moves)
-        if (has_spd_up or has_protect) and rng(196):
+        if (has_spd_up or has_protect) and rng(_P77):
             score += 2
         return score
+    # POISON
+    if user.hp_pct < 50 or target.hp_pct <= 50:
+        score -= 1
+    return score
 
-    # --- Poison (AI_CV_Poison) ---
-    if move.effect == MoveEffect.POISON:
-        if user.hp_pct < 50 or target.hp_pct <= 50:
-            score -= 1
-        return score
 
-    # --- Reflect (AI_CV_Reflect) ---
+# Source: AI_CV_Reflect, AI_CV_LightScreen
+def _flag2_screens(move, user, target, ctx, rng) -> int:
+    score = 0
     if move.effect == MoveEffect.REFLECT:
         if user.hp_pct < 50:
             score -= 2
         elif not any(t in _REFLECT_PHYSICAL_TYPES for t in target.types):
-            if rng(206):
+            if rng(_P80):
                 score -= 2
         return score
-
-    # --- Light Screen (AI_CV_LightScreen) ---
-    if move.effect == MoveEffect.LIGHT_SCREEN:
-        if user.hp_pct < 50:
+    # LIGHT_SCREEN
+    if user.hp_pct < 50:
+        score -= 2
+    elif not any(t in _LIGHT_SCREEN_SPECIAL_TYPES for t in target.types):
+        if rng(_P80):
             score -= 2
-        elif not any(t in _LIGHT_SCREEN_SPECIAL_TYPES for t in target.types):
-            if rng(206):
-                score -= 2
-        return score
+    return score
 
-    # --- Rain Dance (AI_CV_RainDance) ---
+
+# Source: AI_CV_RainDance, AI_CV_SunnyDay, AI_CV_Hail
+def _flag2_weather(move, user, target, ctx, rng) -> int:
+    score = 0
     if move.effect == MoveEffect.RAIN_DANCE:
         if user.hp_pct < 40:
             score -= 1
         elif ctx.weather not in (Weather.NONE, Weather.RAIN):
             score += 1
         return score
-
-    # --- Sunny Day (AI_CV_SunnyDay) ---
     if move.effect == MoveEffect.SUNNY_DAY:
         if user.hp_pct < 40:
             score -= 1
         elif ctx.weather not in (Weather.NONE, Weather.SUN):
             score += 1
         return score
+    # HAIL
+    if user.hp_pct < 40:
+        score -= 1
+    elif ctx.weather not in (Weather.NONE, Weather.HAIL):
+        score += 1
+    return score
 
-    # --- Hail (AI_CV_Hail) ---
-    if move.effect == MoveEffect.HAIL:
-        if user.hp_pct < 40:
-            score -= 1
-        elif ctx.weather not in (Weather.NONE, Weather.HAIL):
-            score += 1
-        return score
 
-    # --- Protect (AI_CV_Protect) ---
+# Source: AI_CV_Protect, AI_CV_Endure
+def _flag2_protect_endure(move, user, target, ctx, rng) -> int:
+    score = 0
     if move.effect == MoveEffect.PROTECT:
         if user.protected_consecutive > 1:
             score -= 2
@@ -1331,89 +1310,88 @@ def apply_flag2(ctx: BattleContext, rng) -> int:  # noqa: C901
                        or target.under_yawn or target.infatuated)
         if user_cond or target_cond:
             score += 2
-        if rng(128):
+        if rng(_P50):
             score -= 1
         if user.protected_consecutive == 1:
             score -= 1
-            if rng(128):
+            if rng(_P50):
                 score -= 1
         return score
+    # ENDURE
+    if user.hp_pct < 4 or user.hp_pct >= 35:
+        score -= 1
+    elif rng(_P73):  # 73% chance +1 when HP in [4, 35)
+        score += 1
+    return score
 
-    # --- Endure (AI_CV_Endure) — separate from Protect ---
-    if move.effect == MoveEffect.ENDURE:
-        if user.hp_pct < 4 or user.hp_pct >= 35:
-            score -= 1
-        elif rng(186):  # 73% chance +1 when HP in [4, 35)
-            score += 1
-        return score
 
-    # --- Sleep Talk ---
+# Source: AI_CV_SleepTalk, AI_CV_DestinyBond
+def _flag2_sleep_talk_db(move, user, target, ctx, rng) -> int:
+    score = 0
     if move.effect == MoveEffect.SLEEP_TALK:
         if user.status == "sleep":
             score += 10
         else:
             score -= 5
         return score
+    # DESTINY_BOND
+    score -= 1  # always -1 first
+    if is_user_faster(ctx) and user.hp_pct <= 70:
+        if rng(_P50):
+            score += 1
+        if user.hp_pct <= 50 and rng(_P50):
+            score += 1
+        if user.hp_pct <= 30 and rng(_P61):
+            score += 2
+    return score
 
-    # --- Destiny Bond (AI_CV_DestinyBond) ---
-    if move.effect == MoveEffect.DESTINY_BOND:
-        score -= 1  # always -1 first
-        if is_user_faster(ctx) and user.hp_pct <= 70:
-            if rng(128):
-                score += 1
-            if user.hp_pct <= 50 and rng(128):
-                score += 1
-            if user.hp_pct <= 30 and rng(156):
-                score += 2
-        return score
 
-    # --- Substitute (AI_CV_Substitute) ---
+# Source: AI_CV_Substitute, AI_CV_Roar, AI_CV_Snore
+def _flag2_substitute_roar_snore(move, user, target, ctx, rng) -> int:
+    score = 0
     if move.effect == MoveEffect.SUBSTITUTE:
-        if user.hp_pct <= 50 and rng(156):
+        if user.hp_pct <= 50 and rng(_P61):
             score -= 1
-        if user.hp_pct <= 70 and rng(156):
+        if user.hp_pct <= 70 and rng(_P61):
             score -= 1
-        if user.hp_pct <= 90 and rng(156):
+        if user.hp_pct <= 90 and rng(_P61):
             score -= 1
         if is_user_faster(ctx) and target.last_move_used is not None:
             if target.last_move_used.effect in (
                     MoveEffect.SLEEP, MoveEffect.TOXIC, MoveEffect.POISON,
                     MoveEffect.PARALYZE, MoveEffect.WILL_O_WISP,
                     MoveEffect.CONFUSE, MoveEffect.LEECH_SEED):
-                if rng(156):
+                if rng(_P61):
                     score += 1
         return score
-
-    # --- Roar / Whirlwind (AI_CV_Roar) ---
     if move.effect == MoveEffect.ROAR:
         max_target_stage = max(
             target.atk_stage, target.def_stage, target.spa_stage,
             target.spd_stage, target.eva_stage
         )
         if max_target_stage >= 3:
-            if rng(128):
+            if rng(_P50):
                 score += 2
         else:
             score -= 3
         return score
+    # SNORE
+    score += 2
+    return score
 
-    # --- Snore (AI_CV_Snore) — unconditional +2 ---
-    if move.effect == MoveEffect.SNORE:
-        score += 2
-        return score
 
-    # --- Confuse (AI_CV_Confuse) — HP-based graduated penalties ---
+# Source: AI_CV_ConfuseHit, AI_CV_Swagger, AI_CV_Flatter
+def _flag2_confusion_group(move, user, target, ctx, rng) -> int:
+    score = 0
     if move.effect in (MoveEffect.CONFUSE, MoveEffect.TEETER_DANCE):
         if target.hp_pct <= 70:
-            if rng(128):
+            if rng(_P50):
                 score -= 1
             if target.hp_pct <= 50:
                 score -= 1
                 if target.hp_pct <= 30:
                     score -= 1
         return score
-
-    # --- Swagger (AI_CV_Swagger) ---
     if move.effect == MoveEffect.SWAGGER:
         has_psych_up = any(m.effect == MoveEffect.PSYCH_UP for m in user.moves)
         if has_psych_up:
@@ -1425,31 +1403,32 @@ def apply_flag2(ctx: BattleContext, rng) -> int:  # noqa: C901
                 score -= 5
             return score
         # No Psych Up: fall through to Flatter handler (+1, then Confuse)
-        if rng(128):
+        if rng(_P50):
             score += 1
         if target.hp_pct <= 70:
-            if rng(128):
+            if rng(_P50):
                 score -= 1
             if target.hp_pct <= 50:
                 score -= 1
                 if target.hp_pct <= 30:
                     score -= 1
         return score
-
-    # --- Flatter (AI_CV_Flatter) ---
-    if move.effect == MoveEffect.FLATTER:
-        if rng(128):
-            score += 1
-        if target.hp_pct <= 70:
-            if rng(128):
+    # FLATTER
+    if rng(_P50):
+        score += 1
+    if target.hp_pct <= 70:
+        if rng(_P50):
+            score -= 1
+        if target.hp_pct <= 50:
+            score -= 1
+            if target.hp_pct <= 30:
                 score -= 1
-            if target.hp_pct <= 50:
-                score -= 1
-                if target.hp_pct <= 30:
-                    score -= 1
-        return score
+    return score
 
-    # --- Baton Pass (AI_CV_BatonPass) ---
+
+# Source: AI_CV_BatonPass, AI_CV_BellyDrum, AI_CV_Spikes, AI_CV_Curse
+def _flag2_baton_belly_spikes_curse(move, user, target, ctx, rng) -> int:
+    score = 0
     if move.effect == MoveEffect.BATON_PASS:
         max_stage = max(user.atk_stage, user.def_stage, user.spa_stage,
                         user.spd_stage, user.eva_stage)
@@ -1458,7 +1437,7 @@ def apply_flag2(ctx: BattleContext, rng) -> int:  # noqa: C901
                 hp_ok = user.hp_pct <= 70
             else:
                 hp_ok = user.hp_pct <= 60
-            if hp_ok and rng(176):
+            if hp_ok and rng(_P69):
                 score += 2
         elif max_stage >= 2:  # stat == +2: marginal
             if not is_user_faster(ctx):
@@ -1470,147 +1449,197 @@ def apply_flag2(ctx: BattleContext, rng) -> int:  # noqa: C901
         else:
             score -= 2
         return score
-
-    # --- Belly Drum (AI_CV_BellyDrum) ---
     if move.effect == MoveEffect.BELLY_DRUM:
         if user.hp_pct < 90:
             score -= 2
         return score
-
-    # --- Spikes ---
     if move.effect == MoveEffect.SPIKES:
-        if target.has_other_pokemon and rng(128):
+        if target.has_other_pokemon and rng(_P50):
             score += 2
         return score
+    # CURSE
+    if PokeType.GHOST not in user.types:
+        # Non-Ghost: stat-boost path — score based on DEF stage
+        if user.def_stage <= 3 and rng(_P50):
+            score += 1
+        if user.def_stage <= 1 and rng(_P50):
+            score += 1
+        if user.def_stage <= 0 and rng(_P50):
+            score += 1
+    else:
+        # Ghost Curse — cursing the target
+        if user.hp_pct <= 80:
+            score -= 1
+    return score
 
-    # --- Curse (AI_CV_Curse) ---
-    if move.effect == MoveEffect.CURSE:
-        if PokeType.GHOST not in user.types:
-            # Non-Ghost: stat-boost path — score based on DEF stage
-            if user.def_stage <= 3 and rng(128):
-                score += 1
-            if user.def_stage <= 1 and rng(128):
-                score += 1
-            if user.def_stage <= 0 and rng(128):
-                score += 1
-        else:
-            # Ghost Curse — cursing the target
-            if user.hp_pct <= 80:
-                score -= 1
-        return score
 
-    # --- Trick / Knock Off (item theft/swap) ---
+# Source: AI_CV_Trick, AI_CV_SkillSwap
+def _flag2_item_interaction(move, user, target, ctx, rng) -> int:
+    score = 0
     if move.effect in (MoveEffect.TRICK, MoveEffect.KNOCK_OFF):
-        if target.held_item is not None and rng(206):
+        if target.held_item is not None and rng(_P80):
             score += 2
         else:
             score -= 3
         return score
-
-    # --- Thief ---
     if move.effect == MoveEffect.THIEF:
-        if target.held_item is not None and rng(206):
+        if target.held_item is not None and rng(_P80):
             score += 1
         else:
             score -= 2
         return score
+    # SKILL_SWAP / ROLE_PLAY
+    if rng(_P80):
+        score += 2
+    else:
+        score -= 1
+    return score
 
-    # --- Skill Swap / Role Play (AI_CV_ChangeSelfAbility) ---
-    if move.effect in (MoveEffect.SKILL_SWAP, MoveEffect.ROLE_PLAY):
-        if rng(206):
-            score += 2
-        else:
-            score -= 1
-        return score
 
-    # --- Attack Down (AI_CV_AttackDown) ---
+# Source: AI_CV_AtkDown, AI_CV_DefDown, AI_CV_SpeDown, AI_CV_SpAtkDown,
+#         AI_CV_SpDefDown, AI_CV_AccDown, AI_CV_EvaDown, AI_CV_Tickle
+def _flag2_stat_drop(move, user, target, ctx, rng) -> int:
+    score = 0
     if move.effect == MoveEffect.ATK_DOWN:
         if target.atk_stage != 0:
             score -= 1
             if user.hp_pct <= 90:
                 score -= 1
-        if target.atk_stage <= 3 and rng(206):
+        if target.atk_stage <= 3 and rng(_P80):
             score -= 2
         if target.hp_pct <= 70:
             score -= 2
-        if not any(t in _ATK_DOWN_PHYS_TYPES for t in target.types) and rng(206):
+        if not any(t in _ATK_DOWN_PHYS_TYPES for t in target.types) and rng(_P80):
             score -= 2
         return score
-
-    # --- Defense Down (AI_CV_DefenseDown) ---
     if move.effect == MoveEffect.DEF_DOWN:
-        if not (user.hp_pct >= 70 and target.def_stage > -3) and rng(206):
+        if not (user.hp_pct >= 70 and target.def_stage > -3) and rng(_P80):
             score -= 2
         if target.hp_pct <= 70:
             score -= 2
         return score
-
-    # --- Speed Down (AI_CV_SpeedDown) ---
     if move.effect == MoveEffect.SPE_DOWN:
         if not is_user_faster(ctx):  # target faster: encourage
-            if rng(186):
+            if rng(_P73):
                 score += 2
         else:
             score -= 3
         return score
-
-    # --- Sp. Attack Down (AI_CV_SpAtkDown) ---
     if move.effect == MoveEffect.SPA_DOWN:
         if target.spa_stage != 0:
             score -= 1
             if user.hp_pct <= 90:
                 score -= 1
-        if target.spa_stage <= 3 and rng(206):
+        if target.spa_stage <= 3 and rng(_P80):
             score -= 2
         if target.hp_pct <= 70:
             score -= 2
-        if not any(t in _SPA_DOWN_SPEC_TYPES for t in target.types) and rng(206):
+        if not any(t in _SPA_DOWN_SPEC_TYPES for t in target.types) and rng(_P80):
             score -= 2
         return score
-
-    # --- Sp. Defense Down (AI_CV_SpDefDown) ---
     if move.effect == MoveEffect.SPD_DOWN:
-        if not (user.hp_pct >= 70 and target.spd_stage > -3) and rng(206):
+        if not (user.hp_pct >= 70 and target.spd_stage > -3) and rng(_P80):
             score -= 2
         if target.hp_pct <= 70:
             score -= 2
         return score
-
-    # --- Accuracy Down (AI_CV_AccuracyDown) ---
     if move.effect == MoveEffect.ACC_DOWN:
-        if user.hp_pct >= 70 and target.hp_pct > 70 and rng(156):
+        if user.hp_pct >= 70 and target.hp_pct > 70 and rng(_P61):
             score -= 1
-        if target.status == "badly_poison" and rng(186):
+        if target.status == "badly_poison" and rng(_P73):
             score += 2
-        if target.under_leech_seed and rng(186):
+        if target.under_leech_seed and rng(_P73):
             score += 2
-        if target.cursed and rng(186):
+        if target.cursed and rng(_P73):
             score += 2
         if user.hp_pct <= 70 and target.acc_stage == 0:
             if user.hp_pct < 40 or target.hp_pct < 40:
                 score -= 2
-            elif rng(186):
+            elif rng(_P73):
                 score -= 2
         return score
-
-    # --- Evasion Down (AI_CV_EvasionDown) ---
     if move.effect == MoveEffect.EVA_DOWN:
-        if not (user.hp_pct >= 70 and target.eva_stage > -3) and rng(206):
+        if not (user.hp_pct >= 70 and target.eva_stage > -3) and rng(_P80):
             score -= 2
         if target.hp_pct <= 70:
             score -= 2
         return score
-
-    # --- Tickle (AI_CV_DefenseDown) ---
-    if move.effect == MoveEffect.TICKLE:
-        if not (user.hp_pct >= 70 and target.def_stage > -3) and rng(206):
-            score -= 2
-        if target.hp_pct <= 70:
-            score -= 2
-        return score
-
-    # Default: no adjustment for unhandled effects
+    # TICKLE
+    if not (user.hp_pct >= 70 and target.def_stage > -3) and rng(_P80):
+        score -= 2
+    if target.hp_pct <= 70:
+        score -= 2
     return score
+
+
+_FLAG2_DISPATCH: dict = {
+    MoveEffect.SLEEP:              _flag2_sleep_absorb_selfko,
+    MoveEffect.EXPLODE:            _flag2_sleep_absorb_selfko,
+    MoveEffect.MEMENTO:            _flag2_sleep_absorb_selfko,
+    MoveEffect.SPE_UP:             _flag2_speed_evasion_dd,
+    MoveEffect.EVA_UP:             _flag2_speed_evasion_dd,
+    MoveEffect.DRAGON_DANCE:       _flag2_speed_evasion_dd,
+    MoveEffect.ATK_UP:             _flag2_stat_boost_single,
+    MoveEffect.DEF_UP:             _flag2_stat_boost_single,
+    MoveEffect.SPA_UP:             _flag2_stat_boost_single,
+    MoveEffect.SPD_UP:             _flag2_stat_boost_single,
+    MoveEffect.ACC_UP:             _flag2_stat_boost_single,
+    MoveEffect.BULK_UP:            _flag2_multi_stat_boost,
+    MoveEffect.CALM_MIND:          _flag2_multi_stat_boost,
+    MoveEffect.COSMIC_POWER:       _flag2_multi_stat_boost,
+    MoveEffect.WEATHER_HEAL:       _flag2_heal,
+    MoveEffect.RECOVER:            _flag2_heal,
+    MoveEffect.SOFTBOILED:         _flag2_heal,
+    MoveEffect.SWALLOW:            _flag2_heal,
+    MoveEffect.REST:               _flag2_heal,
+    MoveEffect.TOXIC:              _flag2_status_stall,
+    MoveEffect.LEECH_SEED:         _flag2_status_stall,
+    MoveEffect.POISON:             _flag2_status_stall,
+    MoveEffect.REFLECT:            _flag2_screens,
+    MoveEffect.LIGHT_SCREEN:       _flag2_screens,
+    MoveEffect.RAIN_DANCE:         _flag2_weather,
+    MoveEffect.SUNNY_DAY:          _flag2_weather,
+    MoveEffect.HAIL:               _flag2_weather,
+    MoveEffect.PROTECT:            _flag2_protect_endure,
+    MoveEffect.ENDURE:             _flag2_protect_endure,
+    MoveEffect.SLEEP_TALK:         _flag2_sleep_talk_db,
+    MoveEffect.DESTINY_BOND:       _flag2_sleep_talk_db,
+    MoveEffect.SUBSTITUTE:         _flag2_substitute_roar_snore,
+    MoveEffect.ROAR:               _flag2_substitute_roar_snore,
+    MoveEffect.SNORE:              _flag2_substitute_roar_snore,
+    MoveEffect.CONFUSE:            _flag2_confusion_group,
+    MoveEffect.TEETER_DANCE:       _flag2_confusion_group,
+    MoveEffect.SWAGGER:            _flag2_confusion_group,
+    MoveEffect.FLATTER:            _flag2_confusion_group,
+    MoveEffect.BATON_PASS:         _flag2_baton_belly_spikes_curse,
+    MoveEffect.BELLY_DRUM:         _flag2_baton_belly_spikes_curse,
+    MoveEffect.SPIKES:             _flag2_baton_belly_spikes_curse,
+    MoveEffect.CURSE:              _flag2_baton_belly_spikes_curse,
+    MoveEffect.TRICK:              _flag2_item_interaction,
+    MoveEffect.KNOCK_OFF:          _flag2_item_interaction,
+    MoveEffect.THIEF:              _flag2_item_interaction,
+    MoveEffect.SKILL_SWAP:         _flag2_item_interaction,
+    MoveEffect.ROLE_PLAY:          _flag2_item_interaction,
+    MoveEffect.ATK_DOWN:           _flag2_stat_drop,
+    MoveEffect.DEF_DOWN:           _flag2_stat_drop,
+    MoveEffect.SPE_DOWN:           _flag2_stat_drop,
+    MoveEffect.SPA_DOWN:           _flag2_stat_drop,
+    MoveEffect.SPD_DOWN:           _flag2_stat_drop,
+    MoveEffect.ACC_DOWN:           _flag2_stat_drop,
+    MoveEffect.EVA_DOWN:           _flag2_stat_drop,
+    MoveEffect.TICKLE:             _flag2_stat_drop,
+}
+
+
+def apply_flag2(ctx: BattleContext, rng) -> int:
+    """Return Flag 2 score delta by dispatching to focused sub-handlers."""
+    if ctx.targeting_ally:
+        return 0
+    move, user, target = ctx.move, ctx.user, ctx.target
+    if move.is_draining:
+        return _flag2_sleep_absorb_selfko(move, user, target, ctx, rng)
+    handler = _FLAG2_DISPATCH.get(move.effect)
+    return handler(move, user, target, ctx, rng) if handler else 0
 
 
 # ---------------------------------------------------------------------------
@@ -1637,7 +1666,7 @@ def apply_flag7(ctx: BattleContext, rng) -> int:
 
     if ctx.targeting_ally:
         if move.effect == MoveEffect.HELPING_HAND:
-            return 2 if rng(128) else 0
+            return 2 if rng(_P50) else 0
 
         # Fire on Flash Fire ally
         if move.type == PokeType.FIRE and target.ability == "Flash Fire":
@@ -1661,7 +1690,7 @@ def apply_flag7(ctx: BattleContext, rng) -> int:
         best_dmg = max(ctx.move_damage_pcts.values())
         this_dmg = ctx.move_damage_pcts.get(move.name, 0.0)
         if this_dmg >= best_dmg and best_dmg > 0:
-            if rng(128):
+            if rng(_P50):
                 return 3
 
     return 0

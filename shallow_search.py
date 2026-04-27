@@ -81,9 +81,42 @@ NUM_SAMPLES = 10
 MAX_DEPTH = 2
 MATCHUP_WEIGHT: float = 0  # Scale factor applied to matchup cache switch bias
 
-# Module-level matchup cache state (loaded once per unique path, reused across requests)
-_matchup_cache = None       # MatchupInfo object or None
-_matchup_cache_path = None  # Path string of the currently loaded cache
+class _MatchupCacheState:
+    """Process-local cache for loaded MatchupInfo objects, keyed by file path."""
+
+    def __init__(self) -> None:
+        self._path: Optional[str] = None
+        self._obj = None
+
+    def load(self, path):
+        """Return cached MatchupInfo for path, loading from disk if needed.
+
+        Returns None if path is None, loading fails, or module is unavailable.
+        Caches result by path so repeated calls within the same process are free.
+        """
+        if path is None:
+            return None
+        if path == self._path:
+            return self._obj
+        try:
+            import pickle
+            from MatchupInfo import MatchupInfo
+            with open(path, 'rb') as f:
+                obj = pickle.load(f)
+            if not isinstance(obj, MatchupInfo):
+                raise TypeError(f'Expected MatchupInfo, got {type(obj).__name__}')
+            self._obj = obj
+            self._path = path
+            print(f'[matchup] Loaded cache from {path}', file=sys.stderr)
+            return self._obj
+        except Exception as e:
+            print(f'[matchup] Failed to load cache from {path}: {e}', file=sys.stderr)
+            self._obj = None
+            self._path = path  # remember path so we don't retry every turn
+            return None
+
+_MATCHUP_CACHE = _MatchupCacheState()
+
 # Fraction of outcome probability mass to consider when scoring an action, measured from
 # the worst outcome upward.  1.0 = full expected value (current behaviour).  Lower values
 # make the search progressively more risk-averse by ignoring lucky high-score scenarios.
@@ -236,7 +269,7 @@ class TurnNode:
     state: object                    # dict during expansion; None after state is released
     turn: int                        # 0=root, 1, 2, or MAX_DEPTH
     action: str                      # immediate player action taken to reach this node ("" for root)
-    children: dict = field(default_factory=dict)   # dict[str, dict[fp, tuple[TurnNode, int]]]
+    children: dict = field(default_factory=dict)   # dict[str, dict[fingerprint, tuple[TurnNode, int]]]
     score: Optional[float] = None    # None until GetScore sets it; leaf score set at construction
     action_scores: dict = field(default_factory=dict)   # dict[str, float], set by GetScore
     best_action: str = ""            # action with highest score, set by GetScore
@@ -412,11 +445,11 @@ class UniformSampler:
             for (state_key, _, _), f in zip(_FACTOR_SPECS, forced):
                 weight *= _branch_weight(result[state_key], f)
 
-            fp = StateFingerprint(result)
+            fingerprint = StateFingerprint(result)
             if is_last_turn and not _is_switch_only(result):
-                results.append((_score_state(result), fp, weight))
+                results.append((_score_state(result), fingerprint, weight))
             else:
-                results.append((result, fp, weight))
+                results.append((result, fingerprint, weight))
         return results
 
 
@@ -622,19 +655,19 @@ class StratifiedSampler:
             })
 
         # Pass 1: simulate all samples
-        # Records: (item, fp, forced_list, q_list, eligible_list, opp_k, opp_q, opp_elig)
+        # Records: (item, fingerprint, forced_list, q_list, eligible_list, opp_action_idx, opp_sampling_prob, opp_action_eligible)
         records = []
         for i in range(self._n):
             # Sample opponent action (stratified via CategoricalTracker)
             if opp_is_multi:
                 qs    = opp_tracker.q_values(i)
-                opp_k = random.choices(range(len(opp_actions)), weights=qs)[0]
-                opp_q = qs[opp_k]
+                opp_action_idx = random.choices(range(len(opp_actions)), weights=qs)[0]
+                opp_sampling_prob = qs[opp_action_idx]
             else:
-                opp_k, opp_q = 0, 1.0
-            opp_action = opp_actions[opp_k]
+                opp_action_idx, opp_sampling_prob = 0, 1.0
+            opp_action = opp_actions[opp_action_idx]
 
-            stratum  = strata[opp_k]
+            stratum  = strata[opp_action_idx]
             trackers = stratum['trackers']
             local_i  = stratum['count']
 
@@ -668,29 +701,29 @@ class StratifiedSampler:
             stratum['count'] += 1
 
             # Opponent eligibility: move actually executed (not a switch, not OHKOd first)
-            opp_elig = (
+            opp_action_eligible = (
                 opp_is_multi
                 and opp_action is not None
                 and str(opp_action).startswith("move")
                 and not result.get("is_over")
                 and not (result.get("p2_switches") and not result.get("p2_moves"))
             )
-            if opp_elig:
-                opp_tracker.update(opp_k)
+            if opp_action_eligible:
+                opp_tracker.update(opp_action_idx)
 
-            fp   = StateFingerprint(result)
+            fingerprint = StateFingerprint(result)
             item = _score_state(result) if (is_last_turn and not _is_switch_only(result)) else result
-            records.append((item, fp, forced_list, q_list, eligible_list,
-                            opp_k, opp_q, opp_elig))
+            records.append((item, fingerprint, forced_list, q_list, eligible_list,
+                            opp_action_idx, opp_sampling_prob, opp_action_eligible))
 
         # Pass 2: importance weights = binary factor weights × opponent move weight
         final_p_hats     = [[t.p_hat for t in s['trackers']] for s in strata]
         final_opp_p_hats = opp_tracker.p_hats if opp_is_multi else []
 
         results = []
-        for item, fp, forced_list, q_list, eligible_list, opp_k, opp_q, opp_elig in records:
+        for item, fingerprint, forced_list, q_list, eligible_list, opp_action_idx, opp_sampling_prob, opp_action_eligible in records:
             weight = 1.0
-            p_hats = final_p_hats[opp_k]
+            p_hats = final_p_hats[opp_action_idx]
             for j, eligible in enumerate(eligible_list):
                 if not eligible:
                     continue
@@ -703,12 +736,12 @@ class StratifiedSampler:
                     weight = 0.0
                     break
                 weight *= numer / denom
-            if weight != 0.0 and opp_elig:
-                if opp_q == 0.0:
+            if weight != 0.0 and opp_action_eligible:
+                if opp_sampling_prob == 0.0:
                     weight = 0.0
                 else:
-                    weight *= final_opp_p_hats[opp_k] / opp_q
-            results.append((item, fp, weight))
+                    weight *= final_opp_p_hats[opp_action_idx] / opp_sampling_prob
+            results.append((item, fingerprint, weight))
 
         return results
 
@@ -740,12 +773,12 @@ def _run_group(ipc_pool, node_state: dict, p1_action: str, opp_weights: list,
     mean_stddev = None
     if is_last_turn and VARIANCE_ANALYSIS:
         # Filter to float items only — switch-only results arrive as dicts and must be excluded.
-        float_results = [(s, fp, w) for s, fp, w in results if not isinstance(s, dict)]
+        float_results = [(s, fingerprint, w) for s, fingerprint, w in results if not isinstance(s, dict)]
         n = len(float_results)
-        total_w = sum(w for _, _fp, w in float_results)
-        if n >= 2 and total_w > 0:
-            mu = sum(s * w for s, _fp, w in float_results) / total_w
-            var = sum(w * (s - mu) ** 2 for s, _fp, w in float_results) / total_w
+        total_weight = sum(w for _, _fp, w in float_results)
+        if n >= 2 and total_weight > 0:
+            mu = sum(s * w for s, _fp, w in float_results) / total_weight
+            var = sum(w * (s - mu) ** 2 for s, _fp, w in float_results) / total_weight
             mean_stddev = (mu, var ** 0.5)
         else:
             mu = sum(s for s, _fp, _w in float_results) / n if n else 0.0
@@ -862,7 +895,7 @@ def expand_turn_parallel(
             tasks.append((node, p1_action, opp_weights, numSamples))
 
     # Parallel phase: run simulation groups
-    raw_results      = []  # list of (parent_node, p1_action, item, fp, weight)
+    raw_results      = []  # list of (parent_node, p1_action, item, fingerprint, weight)
     variance_records = []  # list of (parent_node, p1_action, mean, stddev) — last turn only
 
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
@@ -875,8 +908,8 @@ def expand_turn_parallel(
         for fut in as_completed(future_map):
             node, p1_action = future_map[fut]
             group_results, group_mean_stddev = fut.result()
-            for item, fp, weight in group_results:
-                raw_results.append((node, p1_action, item, fp, weight))
+            for item, fingerprint, weight in group_results:
+                raw_results.append((node, p1_action, item, fingerprint, weight))
             if group_mean_stddev is not None:
                 mu, sd = group_mean_stddev
                 variance_records.append((node, p1_action, mu, sd))
@@ -885,13 +918,13 @@ def expand_turn_parallel(
     t1 = time.perf_counter()
 
     # Sequential dedup phase
-    seen: dict = {}   # fp -> TurnNode (canonical node at this depth)
+    seen: dict = {}   # fingerprint -> TurnNode (canonical node at this depth)
     new_nodes = []
     total_samples = len(raw_results)
     total_new = total_dupes = 0
 
-    for parent_node, p1_action, item, fp, weight in raw_results:
-        node = seen.get(fp)
+    for parent_node, p1_action, item, fingerprint, weight in raw_results:
+        node = seen.get(fingerprint)
         if node is None:
             if isinstance(item, dict):
                 # State dict: either a normal non-leaf or a switch-only result that
@@ -900,21 +933,21 @@ def expand_turn_parallel(
             else:
                 # Float score: a genuine scored leaf node.
                 node = TurnNode(state=None, turn=turn_num, action=p1_action, score=item)
-            seen[fp] = node
+            seen[fingerprint] = node
             new_nodes.append(node)
             total_new += 1
         else:
             total_dupes += 1
 
-        # Update (parent, action) → fp accumulated weight (float)
+        # Update (parent, action) → fingerprint accumulated weight (float)
         if p1_action not in parent_node.children:
             parent_node.children[p1_action] = {}
         fp_dict = parent_node.children[p1_action]
-        if fp in fp_dict:
-            existing_node, total_w = fp_dict[fp]
-            fp_dict[fp] = (existing_node, total_w + weight)
+        if fingerprint in fp_dict:
+            existing_node, accumulated_weight = fp_dict[fingerprint]
+            fp_dict[fingerprint] = (existing_node, accumulated_weight + weight)
         else:
-            fp_dict[fp] = (node, weight)
+            fp_dict[fingerprint] = (node, weight)
 
     # Release state memory for frontier nodes (leaf states were never stored)
     for node in frontier:
@@ -954,30 +987,30 @@ def GetScore(node: TurnNode) -> float:
     # If PERCENTILE_CUTOFF < 1.0, only the worst PERCENTILE_CUTOFF fraction of outcomes
     # (by probability mass) is considered, discarding lucky high-score scenarios.
     for p1_action, fp_dict in node.children.items():
-        pairs = [(GetScore(child), w) for _, (child, w) in fp_dict.items()]
+        score_weight_pairs = [(GetScore(child), weight) for _, (child, weight) in fp_dict.items()]
 
-        total_weight = sum(w for _, w in pairs)
+        total_weight = sum(weight for _, weight in score_weight_pairs)
         if total_weight == 0:
             # Degenerate: all samples had zero weight — fall back to uniform average
-            n = len(pairs)
-            node.action_scores[p1_action] = sum(s for s, _ in pairs) / n if n else 0.0
+            n = len(score_weight_pairs)
+            node.action_scores[p1_action] = sum(s for s, _ in score_weight_pairs) / n if n else 0.0
             continue
 
         if PERCENTILE_CUTOFF < 1.0:
             # Sort ascending so worst outcomes come first, then keep enough states to
             # account for PERCENTILE_CUTOFF of the total probability mass.
-            pairs.sort(key=lambda x: x[0])
+            score_weight_pairs.sort(key=lambda x: x[0])
             keep_weight = PERCENTILE_CUTOFF * total_weight
             kept, accumulated = [], 0.0
-            for score, w in pairs:
-                kept.append((score, w))
-                accumulated += w
+            for score, weight in score_weight_pairs:
+                kept.append((score, weight))
+                accumulated += weight
                 if accumulated >= keep_weight:
                     break
-            pairs = kept
+            score_weight_pairs = kept
 
-        kept_weight = sum(w for _, w in pairs)
-        node.action_scores[p1_action] = sum(s * w / kept_weight for s, w in pairs)
+        kept_weight = sum(weight for _, weight in score_weight_pairs)
+        node.action_scores[p1_action] = sum(s * weight / kept_weight for s, weight in score_weight_pairs)
 
     if not node.action_scores:
         node.score = 0.0
@@ -1010,23 +1043,23 @@ def _print_turn_scores(parents: list, turn_num: int, matchup_details: dict | Non
     # The mean uses parent action_scores (which respect PERCENTILE_CUTOFF in GetScore).
     # The stddevs use child outcome scores so they reflect actual outcome variance.
     action_data:  dict = {}  # action -> list of (action_score, parent_weight)
-    child_data:   dict = {}  # action -> list of (child_score, parent_w * child_w)
+    child_data:   dict = {}  # action -> list of (child_score, parent_weight * child_weight)
     child_fps:    dict = {}  # action -> set of unique child fingerprints (for to_n)
 
-    for node, w in parents:
+    for node, weight in parents:
         for action, score in node.action_scores.items():
             if action not in action_data:
                 action_data[action] = []
-            action_data[action].append((score, w))
+            action_data[action].append((score, weight))
 
         for action, fp_dict in node.children.items():
             if action not in child_data:
                 child_data[action]  = []
                 child_fps[action]   = set()
-            for fp, (child, child_w) in fp_dict.items():
-                child_fps[action].add(fp)
+            for fingerprint, (child, child_w) in fp_dict.items():
+                child_fps[action].add(fingerprint)
                 if child.score is not None:
-                    child_data[action].append((child.score, w * child_w))
+                    child_data[action].append((child.score, weight * child_w))
 
     if not action_data:
         return
@@ -1035,43 +1068,43 @@ def _print_turn_scores(parents: list, turn_num: int, matchup_details: dict | Non
     print(f"\n[shallow_search] Turn {turn_num} scores ({num_states} unique state{'s' if num_states != 1 else ''}):")
 
     results = []
-    for action, pairs in action_data.items():
-        from_n  = len(pairs)
+    for action, action_score_pairs in action_data.items():
+        from_n  = len(action_score_pairs)
         to_n    = len(child_fps.get(action, ()))
-        total_w = sum(w for _, w in pairs)
+        total_weight = sum(weight for _, weight in action_score_pairs)
 
         # Weighted mean from parent action_scores (respects GetScore's PERCENTILE_CUTOFF)
-        w_mean = sum(s * w for s, w in pairs) / total_w if total_w > 0 else 0.0
+        weighted_mean = sum(s * weight for s, weight in action_score_pairs) / total_weight if total_weight > 0 else 0.0
 
         # Stddev over child outcome scores (variance in what actually happens)
-        c_pairs = child_data.get(action, [])
-        c_total_w = sum(cw for _, cw in c_pairs)
-        nc = len(c_pairs)
+        child_score_pairs = child_data.get(action, [])
+        child_total_weight = sum(cw for _, cw in child_score_pairs)
+        nc = len(child_score_pairs)
 
-        if c_total_w > 0 and nc > 1:
-            w_sd = (sum(cw * (s - w_mean) ** 2 for s, cw in c_pairs) / c_total_w) ** 0.5
+        if child_total_weight > 0 and nc > 1:
+            w_sd = (sum(cw * (s - weighted_mean) ** 2 for s, cw in child_score_pairs) / child_total_weight) ** 0.5
         else:
             w_sd = 0.0
 
         if nc > 1:
-            u_mean = sum(s for s, _ in c_pairs) / nc
-            u_sd = (sum((s - u_mean) ** 2 for s, _ in c_pairs) / nc) ** 0.5
+            u_mean = sum(s for s, _ in child_score_pairs) / nc
+            u_sd = (sum((s - u_mean) ** 2 for s, _ in child_score_pairs) / nc) ** 0.5
         else:
             u_sd = 0.0
 
-        results.append((action, w_mean, w_sd, u_sd, from_n, to_n))
+        results.append((action, weighted_mean, w_sd, u_sd, from_n, to_n))
 
     results.sort(key=lambda x: -x[1])
     best_action = results[0][0] if results else ""
 
-    for action, w_mean, w_sd, u_sd, from_n, to_n in results:
+    for action, weighted_mean, w_sd, u_sd, from_n, to_n in results:
         marker = " <- BEST" if action == best_action else ""
         matchup_str = ''
         if matchup_details and action in matchup_details:
             active_c, bench_c = matchup_details[action]
             total_c = active_c - bench_c
             matchup_str = f'  [matchup: active={active_c:+.3f}  bench={bench_c:+.3f}  total={total_c:+.3f}]'
-        print(f"  {action:<22s}  score={w_mean:.4f}  wsd={w_sd:.4f}  sd={u_sd:.4f}"
+        print(f"  {action:<22s}  score={weighted_mean:.4f}  wsd={w_sd:.4f}  sd={u_sd:.4f}"
               f"  from={from_n}  to={to_n}{matchup_str}{marker}")
 
 
@@ -1123,10 +1156,10 @@ def _print_action_variance(root: TurnNode) -> None:
     """
     def _weighted_percentile(sorted_pairs: list, p: float) -> float:
         """Return the score at cumulative-weight fraction p (0–1)."""
-        total_w = sum(w for _, w in sorted_pairs)
-        if total_w == 0:
+        total_weight = sum(w for _, w in sorted_pairs)
+        if total_weight == 0:
             return sorted_pairs[0][0] if sorted_pairs else 0.0
-        target = p * total_w
+        target = p * total_weight
         accumulated = 0.0
         for score, w in sorted_pairs:
             accumulated += w
@@ -1145,10 +1178,10 @@ def _print_action_variance(root: TurnNode) -> None:
         if n == 0:
             continue
 
-        total_w = sum(w for _, w in pairs)
-        if total_w > 0:
-            mu = sum(s * w for s, w in pairs) / total_w
-            var = sum(w * (s - mu) ** 2 for s, w in pairs) / total_w
+        total_weight = sum(w for _, w in pairs)
+        if total_weight > 0:
+            mu = sum(s * w for s, w in pairs) / total_weight
+            var = sum(w * (s - mu) ** 2 for s, w in pairs) / total_weight
             sd = var ** 0.5
             sorted_pairs = sorted(pairs, key=lambda x: x[0])
             bot10 = _weighted_percentile(sorted_pairs, 0.1)
@@ -1203,32 +1236,8 @@ def _drain_switch_nodes(
 
 
 def _load_matchup_cache(path):
-    """Load (or return cached) MatchupInfo from a pickle file.
-
-    Returns None if path is None, loading fails, or module is unavailable.
-    Caches the result by path so repeated calls within the same process are free.
-    """
-    global _matchup_cache, _matchup_cache_path
-    if path is None:
-        return None
-    if path == _matchup_cache_path:
-        return _matchup_cache
-    try:
-        import pickle
-        from MatchupInfo import MatchupInfo
-        with open(path, 'rb') as f:
-            obj = pickle.load(f)
-        if not isinstance(obj, MatchupInfo):
-            raise TypeError(f'Expected MatchupInfo, got {type(obj).__name__}')
-        _matchup_cache = obj
-        _matchup_cache_path = path
-        print(f'[matchup] Loaded cache from {path}', file=sys.stderr)
-        return _matchup_cache
-    except Exception as e:
-        print(f'[matchup] Failed to load cache from {path}: {e}', file=sys.stderr)
-        _matchup_cache = None
-        _matchup_cache_path = path  # remember the path so we don't retry every turn
-        return None
+    """Load (or return cached) MatchupInfo from a pickle file."""
+    return _MATCHUP_CACHE.load(path)
 
 
 def _apply_matchup_bias(root: 'TurnNode', state: dict, matchup_cache) -> dict:

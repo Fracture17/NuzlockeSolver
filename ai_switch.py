@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Optional
 
 from ai_flags import PokeType, MoveCategory, MoveEffect, type_effectiveness
-from gen3_data import get_move_info, _TYPE_MAP
+from gen3_data import get_move_info, TYPE_MAP
 
 T = PokeType
 
@@ -184,7 +184,7 @@ def _active_poke(side: dict) -> Optional[dict]:
 
 def _poke_types(pokemon: dict) -> list[PokeType]:
     """Extract PokeType list from a Pokémon dict."""
-    return [_TYPE_MAP[t] for t in pokemon.get("types", ["Normal"]) if t in _TYPE_MAP]
+    return [TYPE_MAP[t] for t in pokemon.get("types", ["Normal"]) if t in TYPE_MAP]
 
 
 def _parse_move_id(raw) -> str:

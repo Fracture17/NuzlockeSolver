@@ -368,33 +368,12 @@ class TestSection2Select:
 
         state = _make_state([p1_active], [fainted, cand1, cand2])
         result = _section2_select(state, ["switch 2", "switch 3"], player=2)
-        # Thunder Wave (Electric status → 3 * 2 = 6 vs Tackle (Normal → 100)
-        # Wait: Tackle on Normal vs Water: neutral, base_dmg=100 → 100
-        # Thunder Wave on Electric vs Water: 3 * 2 = 6
-        # Tackle (100) wins, not Thunder Wave (6)
-        # But document example says Thunder Wave wins because of type effectiveness...
-        # Actually re-reading example 2: "it will pick the latter because electric is SE on water"
-        # So Thunder Wave (6 effective dmg) > Tackle (100 neutral)?
-        # That doesn't make sense. Let me re-read...
-        # Actually, the candidate with Thunder Wave is Ampharos.
-        # Candidate 1 (Raticate) has Tackle: Normal vs Water = 100 (neutral)
-        # Candidate 2 (Ampharos) has Thunder Wave: Electric status vs Water = 6
-        # But document says Thunder Wave wins! This is because the fainted Jolteon's
-        # last move is Thunderbolt (base power 95), not Tackle.
-        # base_dmg = 95 (Thunderbolt's power), not 100!
-        # Cand1 Tackle: 95 (base, neutral Normal vs Water = neutral, 95)
-        # Cand2 Thunder Wave: 3 * 2 = 6 (status × SE)
-        # Hmm, 6 < 95. Thunder Wave shouldn't win...
-        # Let me re-read the document example more carefully.
-        # "The player has a water type pokemon out, the AI has a pokemon with Tackle,
-        # and a pokemon with Thunder Wave, it will pick the latter because electric
-        # is super effective on water."
-        # The document seems to say Thunder Wave wins... but 3*2=6 < 100 (Tackle neutral).
-        # Unless base_dmg is different. What's the last move of the fainted pokemon?
-        # The document doesn't specify - probably Thunder Wave or Tackle from the fainted.
-        # For this test, let me NOT test example 2 strictly and instead just verify
-        # the higher-damage candidate wins.
-        assert result in ["switch 2", "switch 3"]
+        # base_dmg = power of thunderbolt (95), fainted_types = [Electric]
+        # Cand1 Raticate (Normal) + Tackle: Normal vs Water = neutral → dmg = 95
+        # Cand2 Ampharos (Electric) + Thunder Wave: STATUS → base=3, STAB (fainted Electric)
+        #   → int(3 * 1.5)=4, Electric vs Water ×2 → 8
+        # 95 > 8 → Raticate/Tackle wins → switch 2
+        assert result == "switch 2"
 
     def test_example3_stab_from_fainted(self):
         """Normal-type player, fainted Electric Pokémon: Thunderbolt gets STAB bonus."""
@@ -413,17 +392,18 @@ class TestSection2Select:
         assert result == "switch 3"
 
     def test_immune_all_returns_none(self):
-        """If player is immune to every move of every candidate, return None."""
-        # Ghost-type player; candidates only have Normal and Fighting moves
-        p1_active = _make_pokemon("Gengar", ["Ghost", "Poison"], is_active=True)
-        fainted = _make_pokemon("Normal", ["Normal"], hp=0, active_turns=3)
-        # Normal and Fighting vs Ghost = 0 (AI bug skips this, but we're using
-        # status moves here which go through the chart... let's use Ground vs Ghost)
-        cand = _make_pokemon("Sandshrew", ["Ground"], hp=100, move_ids=["tackle"])
-        # Normal vs Ghost: the NORMAL→GHOST entry is SKIPPED by AI bug,
-        # so tackle (Normal) = neutral... This test is tricky.
-        # Use a truly immune case: Electric move vs Ground-type player
-        pass
+        """If every candidate's best move does zero damage to p1, Section 2 returns None."""
+        # Player is Ground-type → immune to Electric (ordered chart: Electric vs Ground = 0)
+        p1_active = _make_pokemon("Sandshrew", ["Ground"], is_active=True)
+        # Fainted AI pokemon (Electric), last move = thunderbolt (power 95)
+        fainted = _make_pokemon("Jolteon", ["Electric"], hp=0,
+                                active_turns=5, last_move="thunderbolt")
+        # Candidate has only Thunderbolt (Electric) → 0 damage vs Ground-type player
+        cand = _make_pokemon("Electrode", ["Electric"], hp=100, move_ids=["thunderbolt"])
+
+        state = _make_state([p1_active], [fainted, cand])
+        result = _section2_select(state, ["switch 2"], player=2)
+        assert result is None
 
     def test_first_candidate_wins_ties(self):
         """When two candidates deal equal damage, the first in party wins."""

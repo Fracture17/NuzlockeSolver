@@ -1,0 +1,91 @@
+{
+  "project": "NuzlockeSolver",
+  "description": "Pokemon Emerald Nuzlocke battle solver: simulates trainer battles and recommends optimal moves/switches using Gen 3 AI flag logic and shallow Monte Carlo search.",
+  "requirements": [
+    {
+      "id": "R01",
+      "category": "battle_simulation",
+      "description": "Battle state is communicated via binary-framed JSON IPC with a Node.js Pokemon Showdown subprocess (Connection.js). Each message is prefixed with a 4-byte big-endian payload length."
+    },
+    {
+      "id": "R02",
+      "category": "battle_simulation",
+      "description": "IPC actions are 0-based index strings ('0:1:2:3'). parse_move_actions and parse_switch_actions convert to 1-based action strings ('move 1', 'switch 2', etc.)."
+    },
+    {
+      "id": "R03",
+      "category": "battle_simulation",
+      "description": "Battle is terminal when all four IPC action fields (p1Moves, p1Switches, p2Moves, p2Switches) are absent. A forced opponent switch (only p2Switches present) is NOT terminal."
+    },
+    {
+      "id": "R04",
+      "category": "ai_flags",
+      "description": "Trainer AI implements Gen 3 Emerald flags 0, 1, 2, 3, 4, and 7. Flag 0 filters bad moves (uselessness checks). Flag 1 rewards moves that would faint the opponent. Flag 2 adjusts scores for move viability. Flag 3 rewards setup on the first turn. Flag 4 encourages risky moves. Flag 7 applies double-battle targeting logic."
+    },
+    {
+      "id": "R05",
+      "category": "ai_flags",
+      "description": "Trainer-specific flag sets: baseline trainers use flags [0, 1, 2]. Winona uses [0, 1, 2, 7]. Sidney uses [0, 1, 2, 4]."
+    },
+    {
+      "id": "R06",
+      "category": "ai_flags",
+      "description": "RNG in flag scoring uses random.randint(0, 255) < threshold (8-bit GBA RNG model). Thresholds come from pokeemerald battle_ai_script_commands.c."
+    },
+    {
+      "id": "R07",
+      "category": "scoring",
+      "description": "HP-based reward function: score = sum(p1 HP%) - 2*sum(p2 HP%) - 3*(p1 fainted count). Range approximately [-30, 6] for 6v6."
+    },
+    {
+      "id": "R08",
+      "category": "search",
+      "description": "Shallow search uses a 2-turn lookahead tree with stratified importance sampling. Player actions are searched; opponent actions are sampled using a Beta/Dirichlet posterior updated per simulation."
+    },
+    {
+      "id": "R09",
+      "category": "search",
+      "description": "Convergence is detected using standard error of the mean (SEM) on running scores. Simulations continue until SEM falls below a threshold or a maximum iteration count is reached."
+    },
+    {
+      "id": "R10",
+      "category": "search",
+      "description": "Shallow search runs in a separate free-threaded Python 3.14t subprocess (PYTHON_GIL=0) to enable true parallelism. Each worker thread holds its own NodeIPC connection."
+    },
+    {
+      "id": "R11",
+      "category": "switch_ai",
+      "description": "Opponent switch-in selection uses two-stage Gen 3 Emerald algorithm: Section 1 picks by type-score ordering chart; Section 2 picks by maximum expected damage from the fainted Pokemon's last move (with STAB)."
+    },
+    {
+      "id": "R12",
+      "category": "team_selection",
+      "description": "Team selection brute-force searches all valid 6-Pokemon teams, scoring each by normalized matchup scores across opponents. Teams must satisfy species uniqueness, item uniqueness, and TM resource constraints."
+    },
+    {
+      "id": "R13",
+      "category": "team_selection",
+      "description": "Lum Berry assignment: during matchup simulation, statuses blocked by Lum Berry are tracked. Each Pokemon is assigned the cure berry for the most common blocked status against its primary opponent."
+    },
+    {
+      "id": "R14",
+      "category": "badge_boosts",
+      "description": "Badge-based stat boosts (Stone Badge/ATK, Balance Badge/DEF, Dynamo Badge/SPE, Mind Badge/SP.ATK+SP.DEF) are applied to player stats during simulation when the corresponding config flags are set."
+    },
+    {
+      "id": "R15",
+      "category": "opponent_items",
+      "description": "Opponent healing items (e.g. Full Restore) are simulated with a configurable item type and quantity (APPROVED_OPPONENT_ITEMS, OPP_ITEMS in config.py)."
+    },
+    {
+      "id": "R16",
+      "category": "move_data",
+      "description": "Move data (type, category, power, accuracy, effects, flags) is loaded from gen3_moves.json at import time. This JSON is extracted from the @pkmn/sim Pokemon Showdown simulator."
+    },
+    {
+      "id": "R17",
+      "category": "ipc_fields",
+      "description": "Key IPC battle JSON paths: pokemon['moveSlots'] for moves, pokemon['storedStats'] for computed stats, pokemon['types'] for type list, pokemon['set']['level'] for level, battle['field']['weather'] for weather, result['p1DmgCalcs'] for raw damage calcs."
+    }
+  ]
+}

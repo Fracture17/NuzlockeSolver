@@ -19,7 +19,7 @@ _JSON_PATH = os.path.join(os.path.dirname(__file__), "gen3_moves.json")
 # String → enum converters
 # ---------------------------------------------------------------------------
 
-_TYPE_MAP: dict[str, PokeType] = {
+TYPE_MAP: dict[str, PokeType] = {
     "Normal":   PokeType.NORMAL,
     "Fire":     PokeType.FIRE,
     "Water":    PokeType.WATER,
@@ -286,12 +286,16 @@ _DOUBLE_LOWER_MAP: dict[str, MoveEffect] = {
 # ---------------------------------------------------------------------------
 
 def _effect_from_fields(mid: str, d: dict) -> MoveEffect:
-    """Derive MoveEffect from PS move data fields (field-based fallback)."""
-    # OHKO
+    """Derive MoveEffect from PS move fields when the name table has no entry.
+
+    Priority order: OHKO → selfdestruct → forceSwitch → selfSwitch → recharge
+    → weather → sideCondition → status → heal → volatileStatus → boosts → NONE.
+    """
+    # OHKO moves (Fissure, Guillotine, etc.)
     if d.get("ohko"):
         return MoveEffect.OHKO
 
-    # Selfdestruct
+    # Selfdestruct / Memento — distinguish "always" explode from "ifHit" stat-drop
     sd = d.get("selfdestruct")
     if sd == "always":
         return MoveEffect.EXPLODE
@@ -310,7 +314,7 @@ def _effect_from_fields(mid: str, d: dict) -> MoveEffect:
     if "recharge" in d.get("flags", {}):
         return MoveEffect.RECHARGE
 
-    # Weather moves
+    # Weather-setting moves (Rain Dance, Sunny Day, Sandstorm, Hail)
     weather = d.get("weather")
     if weather:
         wmap = {
@@ -322,7 +326,7 @@ def _effect_from_fields(mid: str, d: dict) -> MoveEffect:
         if weather in wmap:
             return wmap[weather]
 
-    # Side conditions
+    # Side conditions (Reflect, Light Screen, Safeguard, Mist, Spikes)
     sc = d.get("sideCondition")
     if sc:
         scmap = {
@@ -356,7 +360,7 @@ def _effect_from_fields(mid: str, d: dict) -> MoveEffect:
         # Else: heal flag without heal field = weather-dependent heal
         return MoveEffect.WEATHER_HEAL
 
-    # Volatile status
+    # Volatile status conditions (confusion, substitute, ingrain, etc.)
     vs = d.get("volatileStatus")
     if vs:
         vsmap = {
@@ -388,7 +392,7 @@ def _effect_from_fields(mid: str, d: dict) -> MoveEffect:
         if vs in vsmap:
             return vsmap[vs]
 
-    # Boost-only Status moves
+    # Stat-boost/drop Status moves (single or multi-stat changes)
     boosts = d.get("boosts")
     if boosts and d.get("category") == "Status":
         boost_keys = set(boosts.keys())
@@ -433,7 +437,7 @@ def _effect_from_fields(mid: str, d: dict) -> MoveEffect:
 # ---------------------------------------------------------------------------
 
 def _build_move_info(mid: str, d: dict) -> MoveInfo:
-    poke_type = _TYPE_MAP.get(d.get("type", "Normal"), PokeType.NORMAL)
+    poke_type = TYPE_MAP.get(d.get("type", "Normal"), PokeType.NORMAL)
     category = _CAT_MAP.get(d.get("category", "Physical"), MoveCategory.PHYSICAL)
     power = d.get("basePower", 0)
     priority = d.get("priority", 0)
