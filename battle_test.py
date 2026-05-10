@@ -25,12 +25,10 @@ from battle_record import BattleRecord
 import battle_mode
 from emerald_reader import LAST_MOVES_ADDR
 from game_loop import _cap_party_levels
-from config import BADGE_BOOST_ATK, BADGE_BOOST_DEF, BADGE_BOOST_SP, BADGE_BOOST_SPE
+from config import (BADGE_BOOST_ATK, BADGE_BOOST_DEF, BADGE_BOOST_SP, BADGE_BOOST_SPE,
+                    ROM_PATH, SAVE_FILE, NODE_SCRIPT, TRAINER_NAME)
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-ROM_PATH    = "/home/Fracture/Downloads/emerald.gba"
-SAVE_FILE   = "/home/Fracture/Downloads/emerald.sav"
-NODE_SCRIPT = "/home/Fracture/WebstormProjects/pokemon-showdown-master/Connection.js"
 
 _HERE          = os.path.dirname(os.path.abspath(__file__))
 _SAVESTATE_DIR = os.path.join(_HERE, 'savestates')
@@ -38,7 +36,6 @@ _LOG_DIR       = os.path.join(_HERE, 'test_logs')
 
 SHALLOW_WORKERS = 15
 MATCHUP_CACHE_PATH = 'matchup_cache.pkl'  # Set to None to disable matchup bias
-from config import TRAINER_NAME
 
 _STUCK_TIMEOUT  = 30.0   # seconds of no output before declaring stuck
 _MAX_MISMATCHES = 10     # faint mismatch prints before declaring stuck (100 attempts each = 1000 total)
@@ -228,7 +225,7 @@ def run_battle_test(savestate_name: str, config: dict | None = None) -> BattleRe
 
 
 def main():
-    savestate = sys.argv[1] if len(sys.argv) > 1 else 'WattsonTest3'
+    savestate = sys.argv[1] if len(sys.argv) > 1 else 'WallaceShowcase'
     run_number = 0
     while True:
         run_number += 1

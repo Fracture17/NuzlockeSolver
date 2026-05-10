@@ -1118,7 +1118,7 @@ def find_best_surviving_team_e4(node_script_path: str, matchup_info: MatchupInfo
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
-NODE_SCRIPT = "/home/Fracture/WebstormProjects/pokemon-showdown-master/Connection.js"
+from config import NODE_SCRIPT
 
 if __name__ == "__main__":
     CACHE = "matchup_cache.pkl"

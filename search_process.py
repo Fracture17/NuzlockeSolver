@@ -12,10 +12,12 @@ import json
 import os
 import struct
 import subprocess
+import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
-_PYTHON_T       = os.path.join(_HERE, '.venv_t', 'bin', 'python3.14t')
+_PYTHON_T = os.path.join(_HERE, '.venv_t',
+    'Scripts\\python.exe' if sys.platform == 'win32' else 'bin/python3.14t')
 _SHALLOW_SERVER = os.path.join(_HERE, 'shallow_search.py')
 
 
@@ -43,7 +45,7 @@ class ShallowSearchProcess:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=stderr,
             cwd=_HERE, env=env, bufsize=0,
-            start_new_session=True,
+            start_new_session=(sys.platform != 'win32'),
         )
         self._node_script = node_script_path
         self._num_workers = num_workers

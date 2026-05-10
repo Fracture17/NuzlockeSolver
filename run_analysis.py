@@ -39,7 +39,7 @@ from test2 import build_scores
 # Configuration
 # ---------------------------------------------------------------------------
 
-NODE_SCRIPT = "/home/Fracture/WebstormProjects/pokemon-showdown-master/Connection.js"
+from config import NODE_SCRIPT
 
 LEVEL_MULTIPLIERS = [0.9, 1.0]
 ITERATIONS = [100, 1000]

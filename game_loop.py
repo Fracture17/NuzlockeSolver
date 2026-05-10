@@ -60,9 +60,7 @@ import tkinter.filedialog
 import battle_mode
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-ROM_PATH    = "/home/Fracture/Downloads/emerald.gba"   # dummy
-SAVE_FILE   = "/home/Fracture/Downloads/emerald.sav"   # dummy — battery save (.sav)
-NODE_SCRIPT = "/home/Fracture/WebstormProjects/pokemon-showdown-master/Connection.js"
+from config import ROM_PATH, SAVE_FILE, NODE_SCRIPT
 SCALE     = 6                                # 240×160 → 720×480
 SCAN_INTERVAL = 3.0                          # seconds between RAM scans
 

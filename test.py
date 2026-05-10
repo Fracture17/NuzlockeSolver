@@ -1,9 +1,10 @@
 from NodeIPC import NodeIPC
 from MatchupInfo import MatchupInfo
+from config import NODE_SCRIPT
 
 
 if __name__ == "__main__":
-    ipc = NodeIPC("/home/Fracture/WebstormProjects/pokemon-showdown-master/Connection.js")
+    ipc = NodeIPC(NODE_SCRIPT)
 
 
     m = MatchupInfo(ipc)

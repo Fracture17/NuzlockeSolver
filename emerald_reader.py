@@ -29,9 +29,8 @@ import json
 import os
 from datetime import datetime
 
-# ─── Standalone-mode file paths (dummy values — update before running directly) ─
-ROM_PATH  = "/path/to/pokemon_emerald.gba"
-SAVE_FILE = "/path/to/save.sav"   # .sav battery-save file; must be at a battle-start state
+# ─── Standalone-mode file paths ───────────────────────────────────────────────
+from config import ROM_PATH, SAVE_FILE
 
 _HERE      = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE       = os.path.join(_HERE, "OpponentTeam.txt")

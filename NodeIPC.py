@@ -1,6 +1,7 @@
 import subprocess
 import json
 import struct
+import sys
 import threading
 
 
@@ -12,7 +13,7 @@ class NodeIPC:
             stdout=subprocess.PIPE,
             stderr=None,  # let Node print errors to terminal
             bufsize=0,
-            start_new_session=True,
+            start_new_session=(sys.platform != 'win32'),
         )
         self.lock = threading.Lock()
 

@@ -42,11 +42,12 @@ def init_emulator(rom_path: str, save_path: str):
     # runs) fd 1 is already /dev/null and sys.stdout already points to the terminal.
     global _stdout_redirected
     if not _stdout_redirected:
-        _saved_stdout_fd = os.dup(1)
-        _devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(_devnull, 1)
-        os.close(_devnull)
-        sys.stdout = os.fdopen(_saved_stdout_fd, 'w', buffering=1)
+        if sys.platform != 'win32':
+            _saved_stdout_fd = os.dup(1)
+            _devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(_devnull, 1)
+            os.close(_devnull)
+            sys.stdout = os.fdopen(_saved_stdout_fd, 'w', buffering=1)
         _stdout_redirected = True
 
     return core, image, ffi, width, height

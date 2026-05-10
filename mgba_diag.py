@@ -5,7 +5,7 @@ Run with: python3 mgba_diag.py
 from mgba._pylib import ffi, lib
 import mgba.core as mgba_core
 
-ROM_PATH = "/home/Fracture/Downloads/1986 - Pokemon Emerald (U)(TrashMan).gba"
+from config import ROM_PATH
 
 print("1. Testing lib.mCoreCreate(GBA) directly...")
 native = lib.mCoreCreate(lib.mPLATFORM_GBA)

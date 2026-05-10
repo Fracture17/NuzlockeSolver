@@ -11,8 +11,7 @@ import sys
 from NodeIPC import NodeIPC
 from MatchupInfo import BOX, OPPONENT
 
-NODE_SCRIPT = (sys.argv[1] if len(sys.argv) > 1
-               else "/home/Fracture/WebstormProjects/pokemon-showdown-master/Connection.js")
+from config import NODE_SCRIPT
 
 
 def first_active(side):
