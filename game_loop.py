@@ -345,7 +345,25 @@ def main():
     _prev_btn14        = [False]
     _battle_loop_active = threading.Event()  # set while run_battle_loop thread is alive
 
-    audio_queue = queue.Queue(maxsize=32)
+    _out_rate = int(sd.query_devices(kind='output')['default_samplerate'])
+    _gba_rate = 32768
+
+    def _resample(chunk):
+        """Linear-interpolation resample (N,2) int16 from GBA rate to device rate."""
+        if _gba_rate == _out_rate or len(chunk) == 0:
+            return chunk
+        n_out = max(1, round(len(chunk) * _out_rate / _gba_rate))
+        x_old = np.arange(len(chunk), dtype=np.float64)
+        x_new = np.linspace(0.0, len(chunk) - 1, n_out)
+        result = np.empty((n_out, 2), dtype=np.int16)
+        for ch in range(2):
+            result[:, ch] = np.clip(
+                np.interp(x_new, x_old, chunk[:, ch].astype(np.float64)),
+                -32768, 32767,
+            ).astype(np.int16)
+        return result
+
+    audio_queue = queue.Queue(maxsize=6)
     _leftover   = [np.zeros((0, 2), dtype=np.int16)]
 
     def _audio_cb(outdata, frames, time_info, status):
@@ -364,8 +382,7 @@ def main():
                 chunk = audio_queue.get_nowait()
                 n = min(len(chunk), frames - pos)
                 out[pos:pos + n] = chunk[:n]
-                if n < len(chunk):
-                    _leftover[0] = np.vstack([_leftover[0], chunk[n:]])
+                _leftover[0] = chunk[n:] if n < len(chunk) else np.zeros((0, 2), dtype=np.int16)
                 pos += n
             except queue.Empty:
                 break  # fill rest with silence
@@ -397,6 +414,7 @@ def main():
                             chunk = np.frombuffer(
                                 ffi.buffer(raw, read * 2 * 2), dtype=np.int16
                             ).reshape(read, 2).copy()
+                            chunk = _resample(chunk)
                             try:
                                 audio_queue.put_nowait(chunk)
                             except queue.Full:
@@ -416,7 +434,7 @@ def main():
 
     # ── Audio stream (start before emu thread) ──────────────────────────────
     audio_stream = sd.OutputStream(
-        samplerate=32768, channels=2, dtype='int16',
+        samplerate=_out_rate, channels=2, dtype='int16',
         blocksize=512, callback=_audio_cb,
     )
     audio_stream.start()
