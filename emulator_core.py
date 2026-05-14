@@ -34,6 +34,7 @@ def init_emulator(rom_path: str, save_path: str):
     width, height = core.desired_video_dimensions()
     image = mgba.image.Image(width, height)
     core.set_video_buffer(image)
+
     core.reset()
 
     # mgba's C library logs to stdout (fd 1). Save fd 1, redirect it to /dev/null

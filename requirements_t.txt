@@ -1,0 +1,5 @@
+# Requirements for .venv_t (free-threaded Python 3.14t)
+# This venv runs shallow_search.py as a subprocess with PYTHON_GIL=0.
+# pygame and mgba are NOT needed here — the subprocess never touches the emulator or display.
+numpy==2.4.4
+scipy==1.17.1
