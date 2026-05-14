@@ -19,12 +19,15 @@ Controls (keyboard defaults):
 
 import collections
 import os
+import queue
 import sys
 import threading
 import time
 
+import numpy as np
 import pygame
-from mgba._pylib import ffi
+import sounddevice as sd
+from mgba._pylib import ffi, lib
 import mgba.core as mgba_core
 import mgba.image
 from mgba.vfs import open_path as vfs_open_path
@@ -342,6 +345,32 @@ def main():
     _prev_btn14        = [False]
     _battle_loop_active = threading.Event()  # set while run_battle_loop thread is alive
 
+    audio_queue = queue.Queue(maxsize=32)
+    _leftover   = [np.zeros((0, 2), dtype=np.int16)]
+
+    def _audio_cb(outdata, frames, time_info, status):
+        out = np.zeros((frames, 2), dtype=np.int16)
+        pos = 0
+        # consume leftover from previous callback first
+        buf = _leftover[0]
+        if len(buf):
+            n = min(len(buf), frames)
+            out[:n] = buf[:n]
+            _leftover[0] = buf[n:]
+            pos = n
+        # pull fresh chunks from the queue
+        while pos < frames:
+            try:
+                chunk = audio_queue.get_nowait()
+                n = min(len(chunk), frames - pos)
+                out[pos:pos + n] = chunk[:n]
+                if n < len(chunk):
+                    _leftover[0] = np.vstack([_leftover[0], chunk[n:]])
+                pos += n
+            except queue.Empty:
+                break  # fill rest with silence
+        outdata[:] = out
+
     def emu_loop():
         while running[0]:
             t = time.perf_counter()
@@ -354,6 +383,24 @@ def main():
                 _opp_move = int(core.memory.u16[LAST_MOVES_ADDR + 2])
                 if _opp_move:
                     opp_last_move_id[0] = _opp_move
+                # drain mGBA audio buffer every frame
+                audio_buf = core._core.getAudioBuffer(core._core)
+                available  = lib.mAudioBufferAvailable(audio_buf)
+                if available > 0:
+                    fast = speed_mode[0] != 0 or _tab_held[0]
+                    if fast:
+                        lib.mAudioBufferClear(audio_buf)
+                    else:
+                        raw = ffi.new(f'int16_t[{available * 2}]')
+                        read = lib.mAudioBufferRead(audio_buf, raw, available)
+                        if read > 0:
+                            chunk = np.frombuffer(
+                                ffi.buffer(raw, read * 2 * 2), dtype=np.int16
+                            ).reshape(read, 2).copy()
+                            try:
+                                audio_queue.put_nowait(chunk)
+                            except queue.Full:
+                                pass
 
             mode = 2 if _tab_held[0] else speed_mode[0]
             if mode == 0:
@@ -366,6 +413,13 @@ def main():
             remaining = frame_time - elapsed
             if remaining > 0:
                 time.sleep(remaining)
+
+    # ── Audio stream (start before emu thread) ──────────────────────────────
+    audio_stream = sd.OutputStream(
+        samplerate=32768, channels=2, dtype='int16',
+        blocksize=512, callback=_audio_cb,
+    )
+    audio_stream.start()
 
     # ── pygame setup (before emu thread so SDL is fully init'd first) ──────
     pygame.init()
@@ -512,6 +566,8 @@ def main():
         pygame.display.flip()
         clock.tick(60)
 
+    audio_stream.stop()
+    audio_stream.close()
     pygame.quit()
 
 

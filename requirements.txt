@@ -6,3 +6,4 @@ cloudpickle==3.1.2
 numpy==2.4.3
 pygame==2.6.1
 pytest==9.0.2
+sounddevice
