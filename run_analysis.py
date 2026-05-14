@@ -33,7 +33,7 @@ from battle_sim import (
     assemble_team_string,
     assemble_opponent_string, reorder_team,
 )
-from test2 import build_scores
+from team_scoring import build_scores
 
 # ---------------------------------------------------------------------------
 # Configuration

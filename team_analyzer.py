@@ -760,7 +760,7 @@ def find_best_surviving_team(node_script_path: str, matchup_info,
     Returns (score, team_tuple, assignment_dict) for the winning team, or None if all fail.
     """
     from battle_sim import assemble_team_string, assemble_opponent_string, reorder_team
-    from test2 import build_scores, select_best_team
+    from team_scoring import build_scores, select_best_team
     from search_process import ShallowSearchProcess
 
     is_variant = isinstance(matchup_info, VariantMatchupInfo)
@@ -919,7 +919,7 @@ def find_best_surviving_team_e4(node_script_path: str, matchup_info: MatchupInfo
     Returns (score, team, assignment) or None if all teams fail.
     """
     from battle_sim import assemble_team_string, assemble_opponent_string, reorder_team
-    from test2 import select_best_team_e4, build_scores
+    from team_scoring import select_best_team_e4, build_scores
     from search_process import ShallowSearchProcess
 
     badge_boosts = matchup_info.badge_boosts or {}
