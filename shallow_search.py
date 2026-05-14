@@ -77,8 +77,8 @@ def _opp_reservation_allows_item(state: dict) -> bool:
     valid_mons = sum(1 for p in opp_side.get('pokemon', []) if p.get('hp', 0) > 0)
     return valid_mons <= (initial - used) + 1
 
-NUM_SAMPLES = 30
-MAX_DEPTH = 3
+NUM_SAMPLES = 20
+MAX_DEPTH = 2
 MATCHUP_WEIGHT: float = 0  # Scale factor applied to matchup cache switch bias
 
 class _MatchupCacheState:
