@@ -1,5 +1,5 @@
 """
-Unit tests for MatchupInfo.py and test2.py using synthetic data only.
+Unit tests for MatchupInfo.py and team_scoring.py using synthetic data only.
 No pickle file or IPC connection required.
 """
 import sys
@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from MatchupInfo import MatchupResult, PrunedMatchupInfo, MatchupInfo
-from test2 import build_scores, select_best_team
+from team_scoring import build_scores, select_best_team
 
 
 # ---------------------------------------------------------------------------
