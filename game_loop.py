@@ -345,8 +345,8 @@ def main():
     _prev_btn14        = [False]
     _battle_loop_active = threading.Event()  # set while run_battle_loop thread is alive
 
-    _out_rate = int(sd.query_devices(kind='output')['default_samplerate'])
-    _gba_rate = 32768
+    _out_rate = 48000   # PulseAudio native rate (from `pactl info`) — avoids internal resampling
+    _gba_rate = 65536   # mGBA default synthesis rate (2× GBA native 32768 Hz; measured ~65642 Hz)
 
     def _resample(chunk):
         """Linear-interpolation resample (N,2) int16 from GBA rate to device rate."""
@@ -363,7 +363,7 @@ def main():
             ).astype(np.int16)
         return result
 
-    audio_queue = queue.Queue(maxsize=6)
+    audio_queue = queue.Queue(maxsize=8)
     _leftover   = [np.zeros((0, 2), dtype=np.int16)]
 
     def _audio_cb(outdata, frames, time_info, status):
