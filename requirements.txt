@@ -1,0 +1,8 @@
+# Requirements for .venv (regular CPython 3.14)
+# mgba is NOT listed here — it is a custom build loaded via .venv/lib/python3.14/site-packages/mgba_build.pth
+# On a new machine: copy the mgba build directory and update that .pth file to point to it.
+cffi==2.0.0
+cloudpickle==3.1.2
+numpy==2.4.3
+pygame==2.6.1
+pytest==9.0.2
