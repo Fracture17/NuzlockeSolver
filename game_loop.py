@@ -398,6 +398,8 @@ def main():
                 # gLastMoves[1] is valid during turn resolution; 0 at move-selection screen.
                 # Store the last non-zero value so suggest_and_queue_move() can read it.
                 _opp_move = int(core.memory.u16[LAST_MOVES_ADDR + 2])
+                if _opp_move and _opp_move != opp_last_move_id[0]:
+                    print(f'[battle_addr] gLastMoves[1] @ 0x{LAST_MOVES_ADDR + 2:08X} = {_opp_move}')
                 if _opp_move:
                     opp_last_move_id[0] = _opp_move
                 # drain mGBA audio buffer every frame
@@ -502,6 +504,55 @@ def main():
                         finally:
                             _battle_loop_active.clear()
                     threading.Thread(target=_battle_loop_wrapper, daemon=True).start()
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_F6:
+                # ── Battle address scanner ──────────────────────────────────
+                # Press F6 while standing at the FIGHT/POKEMON/BAG/RUN action
+                # menu during a trainer battle.  Scans all of EWRAM and reports
+                # every address where the byte == 2 (gBattleCommunication[0]
+                # candidate) while the adjacent gBattleOutcome candidate is 0.
+                # Repeat with gBattlerFainted == 0 to further filter the list.
+                # Cross-check the printed offsets against the vanilla addresses
+                # to determine the RnB relocation delta.
+                print('[F6] Scanning EWRAM for battle address candidates...')
+                print('[F6]   Conditions: byte==2 (comm candidate) AND')
+                print('[F6]   byte 8 bytes later == 0 (outcome candidate) AND')
+                print('[F6]   byte -0x53 bytes earlier == 0 (fainted candidate)')
+                EWRAM_BASE_SCAN = 0x02000000
+                EWRAM_SIZE_SCAN = 0x40000  # 256 KB
+                # vanilla relative offsets from gBattleCommunication:
+                #   gBattleOutcome  = gBattleCommunication + 8
+                #   gBattlerFainted = gBattleCommunication - 0x179  (0x02024332 - 0x0202420d = 0x125... wait)
+                # Recompute from vanilla:
+                #   gBattleCommunication = 0x02024332
+                #   gBattleOutcome       = 0x0202433a  → +0x08
+                #   gBattlerFainted      = 0x0202420d  → -0x125
+                _OUTCOME_REL  =  0x08
+                _FAINTED_REL  = -0x125
+                with emu_lock:
+                    ewram = _read_bytes(core, EWRAM_BASE_SCAN, EWRAM_SIZE_SCAN)
+                candidates = []
+                for off in range(EWRAM_SIZE_SCAN):
+                    if ewram[off] != 2:
+                        continue
+                    out_off = off + _OUTCOME_REL
+                    fnt_off = off + _FAINTED_REL
+                    if not (0 <= out_off < EWRAM_SIZE_SCAN):
+                        continue
+                    if not (0 <= fnt_off < EWRAM_SIZE_SCAN):
+                        continue
+                    if ewram[out_off] != 0:
+                        continue
+                    if ewram[fnt_off] != 0:
+                        continue
+                    addr = EWRAM_BASE_SCAN + off
+                    candidates.append(addr)
+                if candidates:
+                    print(f'[F6] Found {len(candidates)} candidate(s) for gBattleCommunication:')
+                    for addr in candidates:
+                        delta = addr - 0x02024332
+                        print(f'  0x{addr:08X}  (vanilla delta: {delta:+d} = {delta:#x})')
+                else:
+                    print('[F6] No candidates found — are you at the action menu in a battle?')
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_F2:
                 print("[game_loop] F2 pressed — reading opponent team...")
                 with emu_lock:
@@ -557,6 +608,8 @@ def main():
         # Battle detection — triggered once when enemy count goes 0 → N
         with emu_lock:
             enemy_count = core.memory.u8[ENEMY_PARTY_COUNT_ADDR]
+        if enemy_count != last_enemy_count:
+            print(f'[battle_addr] gEnemyPartyCount @ 0x{ENEMY_PARTY_COUNT_ADDR:08X} = {enemy_count}')
         if enemy_count > 0 and last_enemy_count == 0:
             print(f"[game_loop] Battle start detected — {enemy_count} opponent Pokémon")
             with emu_lock:
