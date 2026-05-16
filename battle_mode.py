@@ -32,6 +32,7 @@ from emerald_reader import (
     TRAINER_BATTLE_ITEM_PS_IDS,
     STATUS2_CONFUSION,
     STATUS2_CURSED,
+    get_game_json_paths,
 )
 from config import APPROVED_OPPONENT_ITEMS, OPP_ITEMS
 from NodeIPC import NodeIPC
@@ -1212,10 +1213,11 @@ def run_battle_loop(core, emu_lock, node_script_path, injected_keys,
     from datetime import datetime
     opp_ai_flags = _flags_for_trainer(trainer_name)
     print(f'[battle_loop] Trainer: {trainer_name or "unknown"} → opponent AI flags {opp_ai_flags}')
-    species_db   = _load_db('gen3_species.json')
-    moves_db     = _load_db('gen3_move_names.json')
-    items_db     = _load_db('gen3_items.json')
-    abilities_db = _load_db('gen3_abilities.json')
+    _paths       = get_game_json_paths()
+    species_db   = _load_db(_paths['species'])
+    moves_db     = _load_db(_paths['moves'])
+    items_db     = _load_db(_paths['items'])
+    abilities_db = _load_db(_paths['abilities'])
     ipc          = NodeIPC(node_script_path)
     shallow_proc = ShallowSearchProcess(node_script_path, num_workers=shallow_workers,
                                         matchup_cache_path=matchup_cache_path)
