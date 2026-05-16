@@ -508,6 +508,8 @@ def decrypt_pokemon(raw: bytes) -> dict:
         'spdef': (iv_word >> 25) & 0x1F,
     }
     ability_slot = (iv_word >> 31) & 0x1
+    flags     = struct.unpack_from('<I', m, 8)[0]   # ss3[2]: ribbons in vanilla; flags in RnB
+    alt_ability = (flags >> 29) & 3                 # RnB: (flags >> 29) & 3 → 0/1/2 (hidden)
 
     # Unencrypted battle stats
     status_raw = struct.unpack_from('<I', raw, 80)[0]
@@ -538,6 +540,7 @@ def decrypt_pokemon(raw: bytes) -> dict:
         'evs':          evs,
         'ivs':          ivs,
         'ability_slot': ability_slot,
+        'alt_ability':  alt_ability,
         'nature':       NATURES[pid % 25],
         'level':        level,
         'current_hp':   current_hp,
@@ -569,9 +572,9 @@ def to_showdown(
     if pkmn['held_item']:
         item = items_db.get(str(pkmn['held_item']), f"Item#{pkmn['held_item']}")
 
-    ability_map = abilities_db.get(_lookup_key, {})
-    ability = ability_map.get(str(pkmn['ability_slot']),
-              ability_map.get('0', 'Unknown'))
+    ability_map  = abilities_db.get(_lookup_key, {})
+    _ability_idx = str(pkmn['alt_ability']) if GAME_MODE == 'rnb' else str(pkmn['ability_slot'])
+    ability      = ability_map.get(_ability_idx, ability_map.get('0', 'Unknown'))
 
     ev_map = [
         ('HP',  pkmn['evs']['hp']),
@@ -763,6 +766,8 @@ def decrypt_box_pokemon(raw: bytes) -> dict | None:
         }
         ability_slot = (iv_word >> 31) & 0x1
         is_egg       = (iv_word >> 30) & 0x1
+        flags        = struct.unpack_from('<I', m, 8)[0]
+        alt_ability  = (flags >> 29) & 3
 
         if is_egg:
             return None
@@ -777,6 +782,7 @@ def decrypt_box_pokemon(raw: bytes) -> dict | None:
             'evs':          evs,
             'ivs':          ivs,
             'ability_slot': ability_slot,
+            'alt_ability':  alt_ability,
             'nature':       NATURES[pid % 25],
             'level':        _level_from_exp(exp),
             'current_hp':   None,
@@ -886,11 +892,14 @@ def _dump_player_slot0(core) -> None:
     print(f'  IVs:  hp={p["ivs"]["hp"]}  atk={p["ivs"]["atk"]}  def={p["ivs"]["def"]}'
           f'  spe={p["ivs"]["spe"]}  spatk={p["ivs"]["spatk"]}  spdef={p["ivs"]["spdef"]}')
     print(f'  stats:        {p["stats"]}')
+    flags_val = struct.unpack_from('<I', m, 8)[0]
     print(f'  IV word raw:  0x{iv_word:08X}  (binary: {iv_word:032b})')
-    print(f'    bit 31 (ability_slot in vanilla): {(iv_word >> 31) & 1}')
-    print(f'    bit 30 (egg flag in vanilla):     {(iv_word >> 30) & 1}')
-    print(f'    bits 30-31 combined (alt_ability candidate): {(iv_word >> 30) & 3}')
-    print(f'  ability_slot: {p["ability_slot"]}  (bit 31 only)')
+    print(f'    bit 31 (ability_slot vanilla): {(iv_word >> 31) & 1}')
+    print(f'    bit 30 (egg flag vanilla):     {(iv_word >> 30) & 1}')
+    print(f'  flags (ss3[2] / Misc+8): 0x{flags_val:08X}  (binary: {flags_val:032b})')
+    print(f'    alt_ability = (flags >> 29) & 3 = {(flags_val >> 29) & 3}')
+    print(f'  ability_slot (vanilla bit 31): {p["ability_slot"]}')
+    print(f'  alt_ability  (RnB ss3[2]):     {p["alt_ability"]}')
 
 
 def read_player_team(core) -> list:
