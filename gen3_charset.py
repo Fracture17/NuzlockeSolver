@@ -11,7 +11,6 @@ gDisplayedStringBattle is the buffer used for current battle message text.
 """
 
 from config import GAME_MODE
-_BATTLE_ADDR_OFFSET = 0xC24 if GAME_MODE == 'rnb' else 0
 
 # Full English Gen 3 character table (pokeemerald charmap)
 GEN3_CHARSET: dict[int, str] = {
@@ -45,7 +44,9 @@ GEN3_CHARSET: dict[int, str] = {
 }
 
 # Address of gDisplayedStringBattle in GBA EWRAM (Pokémon Emerald)
-_BATTLE_TEXT_ADDR = 0x02022E2C - _BATTLE_ADDR_OFFSET  # vanilla: 0x02022E2C
+# gDisplayedStringBattle — does not follow a uniform offset pattern in RnB.
+# vanilla: 0x02022E2C  RnB: 0x0202312E  (RnB is +0x302 higher, not lower)
+_BATTLE_TEXT_ADDR = 0x0202312E if GAME_MODE == 'rnb' else 0x02022E2C
 _BATTLE_TEXT_LEN  = 300
 
 
