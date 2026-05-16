@@ -37,8 +37,6 @@ from emerald_reader import (
     ENEMY_PARTY_COUNT_ADDR,
     PLAYER_PARTY_ADDR,
     POKEMON_SIZE,
-    SPECIES_JSON,
-    MOVES_JSON,
     LAST_MOVES_ADDR,
     BASE_STATS_ROM,
     BASE_STATS_SIZE,
@@ -53,6 +51,7 @@ from emerald_reader import (
     read_player_box,
     log_player_pokemon,
     dump_ram,
+    get_game_json_paths,
 )
 
 import json
@@ -63,7 +62,7 @@ import tkinter.filedialog
 import battle_mode
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-from config import ROM_PATH, SAVE_FILE, NODE_SCRIPT
+from config import ROM_PATH, SAVE_FILE, NODE_SCRIPT, GAME_MODE
 SCALE     = 6                                # 240×160 → 720×480
 SCAN_INTERVAL = 3.0                          # seconds between RAM scans
 
@@ -72,9 +71,9 @@ _SAVESTATE_DIR    = os.path.join(_HERE, 'savestates')
 _SAVESTATE_CONFIG = os.path.join(_HERE, 'savestate_config.json')
 _SAVESTATE_FILETYPES = [('Save states', '*.state'), ('All files', '*.*')]
 
-SCAN_ADDR = 0x02024744   # gEnemyParty
-MAX_VALID_SPECIES = 440   # species IDs above this after decryption are garbage
-LEVEL_CAP = 55            # Party Pokémon are capped to this level every frame
+SCAN_ADDR = (0x02024744 - 0xA54) if GAME_MODE == 'rnb' else 0x02024744   # gEnemyParty
+MAX_VALID_SPECIES = 1233 if GAME_MODE == 'rnb' else 440   # species IDs above this after decryption are garbage
+LEVEL_CAP = 100            # Party Pokémon are capped to this level every frame
 
 # ─── Testing mode — bypass MCTS and use a fixed action sequence ───────────────
 TESTING_MODE    = False
@@ -326,8 +325,9 @@ def _savestate_load_browse(core, emu_lock) -> None:
 
 def main():
     # ── Load lookup tables ──────────────────────────────────────────────────
-    with open(SPECIES_JSON) as f: species_db = json.load(f)
-    with open(MOVES_JSON)   as f: moves_db   = json.load(f)
+    _paths = get_game_json_paths()
+    with open(_paths['species']) as f: species_db = json.load(f)
+    with open(_paths['moves'])   as f: moves_db   = json.load(f)
 
     # ── Load emulator core ──────────────────────────────────────────────────
     core, image, ffi, width, height = emulator_core.init_emulator(ROM_PATH, SAVE_FILE)
@@ -515,11 +515,6 @@ def main():
                 with emu_lock:
                     player_team = read_player_team(core)
                     boxes = read_player_box(core)
-                for p in player_team:
-                    p['level'] = LEVEL_CAP
-                for slot in boxes:
-                    for p in slot:
-                        p['level'] = LEVEL_CAP
                 log_player_pokemon(player_team, boxes)
 
         # Build GBA input bitmask
