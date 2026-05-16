@@ -93,11 +93,12 @@ GENDER_RATIO_OFF = 16          # byte offset of genderRatio within a base stats 
 EXP_GROUP_OFF   = 19           # byte offset of expGroup within a base stats entry
 
 # ─── PC box storage ───────────────────────────────────────────────────────────
-# gPokemonStoragePtr: stable IWRAM pointer that always holds the current EWRAM address
-# of PokemonStorage. Emerald's DMA randomization shifts save blocks in EWRAM on every
-# warp/menu transition — there is no fixed EWRAM address; always dereference this pointer.
+# Vanilla: gPokemonStoragePtr is a stable IWRAM pointer; dereferenced at runtime because
+# Emerald's DMA randomization shifts save blocks in EWRAM on every warp/menu transition.
+# RnB: save blocks are at a fixed EWRAM address (no DMA randomization); use directly.
 # Layout: +0x0000 = u8 currentBox, +0x0001 = boxes[14][30] (80 bytes × 420 slots).
-POKEMON_STORAGE_PTR_ADDR = 0x03005D94   # gPokemonStoragePtr (stable IWRAM pointer)
+POKEMON_STORAGE_PTR_ADDR = 0x03005D94   # vanilla: gPokemonStoragePtr (IWRAM pointer to dereference)
+POKEMON_STORAGE_ADDR     = 0x02028848   # RnB: gPokemonStorage fixed EWRAM address (from runandbun.lua)
 BOX_OFFSET        = 4     # boxes[14][30] start at struct_base + 4 (1 byte currentBox + 3 bytes ARM alignment padding)
 PLAYER_BOX_COUNT  = 14
 BOX_SLOTS_PER_BOX = 30
@@ -924,20 +925,19 @@ def read_player_box(core) -> list:
     """
     Read all Pokémon from the player's PC boxes.
 
-    Dereferences gPokemonStoragePtr (stable IWRAM pointer) to find the current EWRAM
-    location of PokemonStorage. Reads from the 4-byte-aligned storage_base so that
-    all u32 reads in _read_bytes remain aligned; boxes are parsed at BOX_OFFSET within
-    the buffer.
-
-    IWRAM access uses core.memory.iwram.u32[offset] where offset = addr - 0x03000000.
-    Address formula: [0x03005D94] + 1 + (box * 0x960) + (slot * 0x50)
+    RnB mode: gPokemonStorage sits at a fixed EWRAM address (POKEMON_STORAGE_ADDR);
+      no pointer dereference needed because RnB does not use DMA-randomized save blocks.
+    Vanilla mode: dereferences gPokemonStoragePtr (stable IWRAM pointer) to find the
+      current EWRAM location of PokemonStorage, which moves on every warp/menu transition.
     """
-    # core.memory.u32 has size=0x100000000 (full 4GB GBA address space, base=0),
-    # so it accepts any GBA address including IWRAM (0x03xxxxxx) — byte-indexed.
-    storage_base = core.memory.u32[POKEMON_STORAGE_PTR_ADDR]
-    print(f"[box_diag] IWRAM ptr 0x{POKEMON_STORAGE_PTR_ADDR:08X}  "
-          f"storage_base=0x{storage_base:08X}  "
-          f"valid_ewram={0x02000000 <= storage_base <= 0x0203FFFF}")
+    if GAME_MODE == 'rnb':
+        storage_base = POKEMON_STORAGE_ADDR
+        print(f"[box_diag] RnB fixed storage_base=0x{storage_base:08X}")
+    else:
+        storage_base = core.memory.u32[POKEMON_STORAGE_PTR_ADDR]
+        print(f"[box_diag] vanilla IWRAM ptr 0x{POKEMON_STORAGE_PTR_ADDR:08X}  "
+              f"storage_base=0x{storage_base:08X}  "
+              f"valid_ewram={0x02000000 <= storage_base <= 0x0203FFFF}")
 
     # Read from storage_base (4-byte aligned) to avoid misaligned u32 reads in _read_bytes
     total_bytes = BOX_OFFSET + PLAYER_BOX_COUNT * BOX_SLOTS_PER_BOX * BOX_POKEMON_SIZE  # 33,601
