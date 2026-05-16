@@ -819,100 +819,9 @@ def read_enemy_team_validated(core) -> tuple[list, bool]:
     return _read_party(core, ENEMY_PARTY_ADDR)
 
 
-def _dump_player_slot0(core) -> None:
-    """Read and fully dump the first player party slot to stdout.
-
-    Prints:
-      - All 100 raw bytes as hex (16 bytes per line).
-      - Key header fields: PID, OTID, encryption key, checksum (stored vs computed).
-      - The 48 decrypted substructure bytes as hex (16 bytes per line).
-      - All interpreted fields from decrypt_pokemon(), including every IV/EV/move/stat.
-      - IV word bits 30 and 31 explicitly (ability_slot and egg flag in vanilla;
-        may encode hidden-ability in RnB).
-    """
-    raw = _read_bytes(core, PLAYER_PARTY_ADDR, POKEMON_SIZE)
-
-    # ── Raw hex dump ─────────────────────────────────────────────────────────
-    print('[slot0_dump] ── RAW 100 BYTES ─────────────────────────────────────')
-    for row in range(0, POKEMON_SIZE, 16):
-        chunk = raw[row:row + 16]
-        hex_str = ' '.join(f'{b:02X}' for b in chunk)
-        print(f'  {row:03X}: {hex_str}')
-
-    # ── Header fields ────────────────────────────────────────────────────────
-    pid       = struct.unpack_from('<I', raw, 0x00)[0]
-    otid      = struct.unpack_from('<I', raw, 0x04)[0]
-    key       = pid ^ otid
-    stored_cs = struct.unpack_from('<H', raw, 0x1C)[0]
-    total = 0
-    for i in range(12):
-        w = struct.unpack_from('<I', raw, 0x20 + i * 4)[0] ^ key
-        total += (w & 0xFFFF) + (w >> 16)
-    calc_cs = total & 0xFFFF
-    print(f'[slot0_dump] ── HEADER ────────────────────────────────────────────')
-    print(f'  PID:          0x{pid:08X}  ({pid})')
-    print(f'  OTID:         0x{otid:08X}  ({otid})')
-    print(f'  Encrypt key:  0x{key:08X}  (PID ^ OTID)')
-    print(f'  Suborder idx: {pid % 24}  (PID % 24)  → order={SUBORDER[pid % 24]}')
-    print(f'  Checksum:     stored=0x{stored_cs:04X}  computed=0x{calc_cs:04X}  {"OK" if stored_cs == calc_cs else "MISMATCH"}')
-
-    # ── Decrypted substructure hex ───────────────────────────────────────────
-    data = bytearray(raw[32:80])
-    for i in range(0, 48, 4):
-        word = struct.unpack_from('<I', data, i)[0]
-        struct.pack_into('<I', data, i, word ^ key)
-    print(f'[slot0_dump] ── DECRYPTED SUBSTRUCTURES (48 bytes) ────────────────')
-    for row in range(0, 48, 16):
-        chunk = data[row:row + 16]
-        hex_str = ' '.join(f'{b:02X}' for b in chunk)
-        print(f'  {row:02X}: {hex_str}')
-
-    # ── Fully interpreted fields ─────────────────────────────────────────────
-    if stored_cs != calc_cs:
-        print('[slot0_dump] Checksum mismatch — skipping field interpretation')
-        return
-
-    try:
-        p = decrypt_pokemon(raw)
-    except Exception as exc:
-        print(f'[slot0_dump] decrypt_pokemon() raised: {exc}')
-        return
-
-    # IV word bits
-    order   = SUBORDER[pid % 24]
-    m       = _get_substructure(bytes(data), order, 3)
-    iv_word = struct.unpack_from('<I', m, 4)[0]
-
-    print(f'[slot0_dump] ── INTERPRETED FIELDS ──────────────────────────────')
-    print(f'  species:      {p["species"]}')
-    print(f'  held_item:    {p["held_item"]}')
-    print(f'  exp:          {p["exp"]}')
-    print(f'  nature:       {p["nature"]}  (PID % 25 = {pid % 25})')
-    print(f'  level:        {p["level"]}')
-    print(f'  current_hp:   {p["current_hp"]}')
-    print(f'  max_hp:       {p["max_hp"]}')
-    print(f'  status:       {p["status"]!r}')
-    print(f'  moves:        {p["moves"]}')
-    print(f'  pp:           {p["pp"]}')
-    print(f'  EVs:  hp={p["evs"]["hp"]}  atk={p["evs"]["atk"]}  def={p["evs"]["def"]}'
-          f'  spe={p["evs"]["spe"]}  spatk={p["evs"]["spatk"]}  spdef={p["evs"]["spdef"]}')
-    print(f'  IVs:  hp={p["ivs"]["hp"]}  atk={p["ivs"]["atk"]}  def={p["ivs"]["def"]}'
-          f'  spe={p["ivs"]["spe"]}  spatk={p["ivs"]["spatk"]}  spdef={p["ivs"]["spdef"]}')
-    print(f'  stats:        {p["stats"]}')
-    flags_val = struct.unpack_from('<I', m, 8)[0]
-    print(f'  IV word raw:  0x{iv_word:08X}  (binary: {iv_word:032b})')
-    print(f'    bit 31 (ability_slot vanilla): {(iv_word >> 31) & 1}')
-    print(f'    bit 30 (egg flag vanilla):     {(iv_word >> 30) & 1}')
-    print(f'  flags (ss3[2] / Misc+8): 0x{flags_val:08X}  (binary: {flags_val:032b})')
-    print(f'    alt_ability = (flags >> 29) & 3 = {(flags_val >> 29) & 3}')
-    print(f'  ability_slot (vanilla bit 31): {p["ability_slot"]}')
-    print(f'  alt_ability  (RnB ss3[2]):     {p["alt_ability"]}')
-
-
 def read_player_team(core) -> list:
     """Read player party (best-effort, no checksum guarantee).  Use
     read_player_team_validated when the caller can retry on partial reads."""
-    _dump_player_slot0(core)
     team, _ = _read_party(core, PLAYER_PARTY_ADDR)
     return team
 
@@ -1131,7 +1040,9 @@ def read_battle_mon_moves(core, battler_idx: int) -> list[int]:
         List of 4 move IDs as ints (0 = empty slot).
     """
     base = BATTLE_MONS_ADDR + battler_idx * BATTLE_MON_SIZE + BATTLE_MON_MOVES_OFF
-    return [int(core.memory.u16[base + i * 2]) for i in range(4)]
+    moves = [int(core.memory.u16[base + i * 2]) for i in range(4)]
+    print(f'[battle_addr] gBattleMons[{battler_idx}].moves @ 0x{base:08X} = {moves}')
+    return moves
 
 
 def read_last_used_item(core) -> int:
@@ -1141,7 +1052,9 @@ def read_last_used_item(core) -> int:
     0 back (core.memory.u16[LAST_USED_ITEM_ADDR] = 0) so repeated use of the
     same item is detectable next turn.  Call within emu_lock.
     """
-    return int(core.memory.u16[LAST_USED_ITEM_ADDR])
+    val = int(core.memory.u16[LAST_USED_ITEM_ADDR])
+    print(f'[battle_addr] gLastUsedItem @ 0x{LAST_USED_ITEM_ADDR:08X} = {val}')
+    return val
 
 
 def read_battle_mon_status2(core, battler_idx: int) -> int:
@@ -1151,7 +1064,9 @@ def read_battle_mon_status2(core, battler_idx: int) -> int:
     Call within emu_lock.  battler_idx: 0=player, 1=opponent.
     """
     base = BATTLE_MONS_ADDR + battler_idx * BATTLE_MON_SIZE + BATTLE_MON_STATUS2_OFF
-    return int(core.memory.u32[base])
+    val = int(core.memory.u32[base])
+    print(f'[battle_addr] gBattleMons[{battler_idx}].status2 @ 0x{base:08X} = 0x{val:08X}')
+    return val
 
 
 def read_last_moves_raw(core) -> tuple[int, int]:
@@ -1168,6 +1083,7 @@ def read_last_moves_raw(core) -> tuple[int, int]:
     """
     player = int(core.memory.u16[LAST_MOVES_ADDR])
     opp    = int(core.memory.u16[LAST_MOVES_ADDR + 2])
+    print(f'[battle_addr] gLastMoves @ 0x{LAST_MOVES_ADDR:08X} = player={player}  opp={opp}')
     return player, opp
 
 
@@ -1193,7 +1109,9 @@ def read_player_party_idx(core) -> int:
     switches (which do not reorder gPlayerParty).
     Call within emu_lock.
     """
-    return int(core.memory.u16[BATTLER_PARTY_INDEXES_ADDR])
+    val = int(core.memory.u16[BATTLER_PARTY_INDEXES_ADDR])
+    print(f'[battle_addr] gBattlerPartyIndexes[0] @ 0x{BATTLER_PARTY_INDEXES_ADDR:08X} = {val}')
+    return val
 
 
 def read_opp_party_idx(core) -> int:
@@ -1204,7 +1122,9 @@ def read_opp_party_idx(core) -> int:
     it already reflects the newly sent-out Pokémon's party slot.
     Call within emu_lock.
     """
-    return int(core.memory.u16[BATTLER_PARTY_INDEXES_ADDR + 2])
+    val = int(core.memory.u16[BATTLER_PARTY_INDEXES_ADDR + 2])
+    print(f'[battle_addr] gBattlerPartyIndexes[1] @ 0x{BATTLER_PARTY_INDEXES_ADDR + 2:08X} = {val}')
+    return val
 
 
 def read_battle_outcome(core) -> int:
@@ -1213,7 +1133,9 @@ def read_battle_outcome(core) -> int:
     Values: 0=in progress, 1=won, 2=lost, 3=ran, 4=caught, 5=draw.
     Call within emu_lock.
     """
-    return int(core.memory.u8[BATTLE_OUTCOME_ADDR])
+    val = int(core.memory.u8[BATTLE_OUTCOME_ADDR])
+    print(f'[battle_addr] gBattleOutcome @ 0x{BATTLE_OUTCOME_ADDR:08X} = {val}')
+    return val
 
 
 def read_battle_communication(core) -> int:
@@ -1223,7 +1145,9 @@ def read_battle_communication(core) -> int:
     Other values indicate turn resolution, text, or other in-battle states.
     Call within emu_lock.
     """
-    return int(core.memory.u8[BATTLE_COMM_ADDR])
+    val = int(core.memory.u8[BATTLE_COMM_ADDR])
+    print(f'[battle_addr] gBattleCommunication[0] @ 0x{BATTLE_COMM_ADDR:08X} = {val}')
+    return val
 
 
 def read_battler_fainted(core) -> int:
@@ -1232,7 +1156,9 @@ def read_battler_fainted(core) -> int:
     Non-zero while the faint screen is showing and a forced switch is pending.
     Call within emu_lock.
     """
-    return int(core.memory.u8[BATTLER_FAINTED_ADDR])
+    val = int(core.memory.u8[BATTLER_FAINTED_ADDR])
+    print(f'[battle_addr] gBattlerFainted @ 0x{BATTLER_FAINTED_ADDR:08X} = {val}')
+    return val
 
 
 def debug_print_battle_addrs(core, moves_db: dict) -> None:
