@@ -766,7 +766,13 @@ def decrypt_box_pokemon(raw: bytes) -> dict | None:
             'spdef': (iv_word >> 25) & 0x1F,
         }
         ability_slot = (iv_word >> 31) & 0x1
-        is_egg       = (iv_word >> 30) & 0x1
+        # RnB moves the egg flag to byte 19 of the unencrypted header (bit 2).
+        # Vanilla stores it at bit 30 of the IV word, but RnB repurposes that bit,
+        # causing normal Pokémon to be falsely skipped if we use the vanilla check.
+        if GAME_MODE == 'rnb':
+            is_egg = (raw[19] >> 2) & 0x1
+        else:
+            is_egg = (iv_word >> 30) & 0x1
         flags        = struct.unpack_from('<I', m, 8)[0]
         alt_ability  = (flags >> 29) & 3
 
