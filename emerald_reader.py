@@ -19,8 +19,8 @@ Prerequisites:
     .venv/lib/python3.14/site-packages/mgba_build.pth points to
     /home/Fracture/mgba/build/python/lib.linux-x86_64-cpython-314/
 
-Memory addresses are for Pokémon Emerald (US, v1.0).
-Verify against the pret/pokeemerald decompilation symbol map if they seem wrong.
+Memory addresses are for Pokémon Run & Bun (vanilla Emerald US v1.0 - 0xA54).
+Vanilla Emerald addresses are preserved as comments on the line above each constant.
 
 """
 
@@ -30,7 +30,8 @@ import os
 from datetime import datetime
 
 # ─── Standalone-mode file paths ───────────────────────────────────────────────
-from config import ROM_PATH, SAVE_FILE
+from config import ROM_PATH, SAVE_FILE, GAME_MODE
+_ADDR_OFFSET = 0xA54 if GAME_MODE == 'rnb' else 0
 
 _HERE      = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE       = os.path.join(_HERE, "OpponentTeam.txt")
@@ -39,24 +40,54 @@ MOVES_JSON     = os.path.join(_HERE, "gen3_move_names.json")
 ITEMS_JSON     = os.path.join(_HERE, "gen3_items.json")
 ABILITIES_JSON = os.path.join(_HERE, "gen3_abilities.json")
 
-# ─── Pokémon Emerald (US v1.0) memory addresses ──────────────────────────────
+import json as _json
+_RNB_CURVES: dict = {}
+if GAME_MODE == 'rnb':
+    _rnb_curves_path = os.path.join(_HERE, 'rnb_curves.json')
+    if os.path.exists(_rnb_curves_path):
+        with open(_rnb_curves_path) as _f:
+            _RNB_CURVES = _json.load(_f)
+
+
+def get_game_json_paths() -> dict:
+    """Return the correct JSON lookup file paths for the current GAME_MODE."""
+    if GAME_MODE == 'rnb':
+        return {
+            'species':   os.path.join(_HERE, 'rnb_species.json'),
+            'moves':     os.path.join(_HERE, 'rnb_move_names.json'),
+            'items':     os.path.join(_HERE, 'rnb_items.json'),
+            'abilities': os.path.join(_HERE, 'rnb_abilities.json'),
+        }
+    return {
+        'species':   os.path.join(_HERE, 'gen3_species.json'),
+        'moves':     os.path.join(_HERE, 'gen3_move_names.json'),
+        'items':     os.path.join(_HERE, 'gen3_items.json'),
+        'abilities': os.path.join(_HERE, 'gen3_abilities.json'),
+    }
+
+# ─── Pokémon Run & Bun memory addresses (vanilla Emerald US v1.0 - 0xA54) ────
 # gEnemyParty: 6 consecutive 100-byte encrypted Pokémon structs
-ENEMY_PARTY_ADDR       = 0x02024744
+# ENEMY_PARTY_ADDR       = 0x02024744  # vanilla Emerald US v1.0
+ENEMY_PARTY_ADDR       = 0x02024744 - _ADDR_OFFSET
 # gEnemyPartyCount: u8
-ENEMY_PARTY_COUNT_ADDR = 0x020244EA
+#This address is wrong and isn't really used
+# ENEMY_PARTY_COUNT_ADDR = 0x020244EA  # vanilla Emerald US v1.0
+ENEMY_PARTY_COUNT_ADDR = 0x020244EA - _ADDR_OFFSET
 
 POKEMON_SIZE = 100  # bytes per party struct
-MAX_VALID_SPECIES = 440  # species IDs above this after decryption are garbage
+MAX_VALID_SPECIES = 1233 if GAME_MODE == 'rnb' else 440  # species IDs above this after decryption are garbage
 
 # ─── Player party ─────────────────────────────────────────────────────────────
 # gPlayerParty: 6 × 100-byte encrypted Pokémon structs
-PLAYER_PARTY_ADDR       = 0x020244EC
+#PLAYER_PARTY_ADDR       = 0x020244EC  # vanilla Emerald US v1.0
+PLAYER_PARTY_ADDR       = 0x020244EC - _ADDR_OFFSET
 # gPlayerPartyCount: u8
-PLAYER_PARTY_COUNT_ADDR = 0x020244E9
+#PLAYER_PARTY_COUNT_ADDR = 0x020244E9  # vanilla Emerald US v1.0
+PLAYER_PARTY_COUNT_ADDR = 0x020244E9 - _ADDR_OFFSET
 
 # ─── ROM base stats table (Pokémon Emerald US v1.0) ──────────────────────────
 # Used to look up the growth-rate group when computing box Pokémon levels from EXP.
-BASE_STATS_ROM  = 0x083203CC  # gBaseStats[] ROM address
+BASE_STATS_ROM  = 0x083203CC  # gBaseStats[] ROM address — verify for RnB if gender/level reads seem wrong
 BASE_STATS_SIZE = 28           # bytes per entry
 GENDER_RATIO_OFF = 16          # byte offset of genderRatio within a base stats entry
 EXP_GROUP_OFF   = 19           # byte offset of expGroup within a base stats entry
@@ -82,7 +113,8 @@ RAM_DUMP_FILE = os.path.join(_HERE, "ram_ewram.bin")
 
 # ─── Battle-active structs (addresses from pokeemerald.sym) ──────────────────
 # gBattleMons: BattlePokemon[4], 0x58 bytes each.  [0]=player, [1]=opponent
-BATTLE_MONS_ADDR     = 0x02024084  # from pokeemerald.sym (size 0x160)
+# BATTLE_MONS_ADDR     = 0x02024084  # vanilla Emerald US v1.0
+BATTLE_MONS_ADDR     = 0x02024084 - _ADDR_OFFSET
 BATTLE_MON_SIZE      = 0x58        # sizeof(BattlePokemon)
 BATTLE_MON_MOVES_OFF   = 0x0C      # u16[4] moves at struct offset 0x0C (after species + 5 stats)
 BATTLE_MON_STATUS2_OFF = 0x50      # u32 volatile-status flags (status2) at struct offset 0x50
@@ -93,11 +125,13 @@ STATUS2_CURSED    = 0x00002000     # bit 13: Pokémon is under Curse
 
 # gLastMoves: u16[4], last move ID used by each battler. [0]=player, [1]=opponent.
 # Valid only during turn resolution; reset at the start of each new turn.
-LAST_MOVES_ADDR      = 0x02024248  # from pokeemerald.sym (size 0x08)
+# LAST_MOVES_ADDR      = 0x02024248  # vanilla Emerald US v1.0
+LAST_MOVES_ADDR      = 0x02024248 - _ADDR_OFFSET
 
 # gLastUsedItem: u16; set when any battler uses a battle item.  Does NOT reset to 0 between
 # turns — must be manually zeroed after reading to support detection of repeated item use.
-LAST_USED_ITEM_ADDR  = 0x02024208  # from pokeemerald.sym (size 0x02)
+# LAST_USED_ITEM_ADDR  = 0x02024208  # vanilla Emerald US v1.0
+LAST_USED_ITEM_ADDR  = 0x02024208 - _ADDR_OFFSET
 
 # Item IDs that trainers can use from their bag during battle (Gen 3 Emerald, items.h).
 # Held items (berries, etc.) also trigger gLastUsedItem — filter to only these.
@@ -124,16 +158,20 @@ TRAINER_BATTLE_ITEM_PS_IDS = {
 # gBattlerFainted: u8; observed value is 1 during all normal battle flow after the first turn,
 # and drops to 0 specifically when the forced-switch party screen is showing.
 # Value is also 0 before the first action menu (ps_state guard prevents false triggers then).
-BATTLER_FAINTED_ADDR = 0x0202420d  # from pokeemerald.sym (size 0x01)
+# BATTLER_FAINTED_ADDR = 0x0202420d  # vanilla Emerald US v1.0
+BATTLER_FAINTED_ADDR = 0x0202420d - _ADDR_OFFSET
 
 # gBattlerPartyIndexes: u16[4], active party slot per battler. [0]=player, [1]=opponent
-BATTLER_PARTY_INDEXES_ADDR = 0x0202406e  # from pokeemerald.sym (size 0x08)
+# BATTLER_PARTY_INDEXES_ADDR = 0x0202406e  # vanilla Emerald US v1.0
+BATTLER_PARTY_INDEXES_ADDR = 0x0202406e - _ADDR_OFFSET
 
 # gBattleCommunication: u8[8]; [0]==2 when player is at the main battle action menu
-BATTLE_COMM_ADDR = 0x02024332  # from pokeemerald.sym (size 0x08)
+# BATTLE_COMM_ADDR = 0x02024332  # vanilla Emerald US v1.0
+BATTLE_COMM_ADDR = 0x02024332 - _ADDR_OFFSET
 
 # gBattleOutcome: u8; non-zero when battle has ended (1=won, 2=lost, 3=ran, 4=caught, 5=draw)
-BATTLE_OUTCOME_ADDR = 0x0202433a  # from pokeemerald.sym (size 0x01)
+# BATTLE_OUTCOME_ADDR = 0x0202433a  # vanilla Emerald US v1.0
+BATTLE_OUTCOME_ADDR = 0x0202433a - _ADDR_OFFSET
 
 # ─── Internal species ID → name (GBA internal ordering, NOT national dex) ────
 # Gen 1+2 (IDs 1–251): internal ID == national dex, looked up via species_db at runtime.
@@ -300,10 +338,15 @@ def _internal_to_national_dex(sid: int) -> int:
 def internal_species_name(sid: int, species_db: dict) -> str:
     """Translate a GBA internal species ID to a display name.
 
-    For IDs 1–251 the internal ID matches the national dex, so we fall back
-    to species_db (which is keyed by national dex number).  For 252+ the
-    internal ordering diverges from national dex and we use _GEN3_INTERNAL_NAMES.
+    In RnB mode: species_db is keyed directly by internal ID, so lookup is direct.
+    In vanilla mode: IDs 252+ use _GEN3_INTERNAL_NAMES (vanilla Emerald ordering);
+      IDs 1-251 fall through to species_db (keyed by national dex == internal ID).
+    Note: _GEN3_INTERNAL_NAMES is vanilla-only and must NOT be used in RnB mode
+    because RnB's internal ordering diverges from vanilla after ID 251.
     """
+    if GAME_MODE == 'rnb':
+        return species_db.get(str(sid), f"Species#{sid}")
+    # vanilla path
     if sid in _GEN3_INTERNAL_NAMES:
         return _GEN3_INTERNAL_NAMES[sid]
     return species_db.get(str(sid), f"Species#{sid}")
@@ -379,15 +422,23 @@ def _read_party(core, base_addr: int) -> tuple[list, bool]:
     all_valid = True
     for i in range(6):
         raw = _read_bytes(core, base_addr + i * POKEMON_SIZE, POKEMON_SIZE)
-        if not _check_pokemon_checksum(raw):
+        pid  = struct.unpack_from('<I', raw, 0)[0]
+        otid = struct.unpack_from('<I', raw, 4)[0]
+        cs_ok = _check_pokemon_checksum(raw)
+        print(f'[struct_diag] slot {i}: pid=0x{pid:08X}  otid=0x{otid:08X}  checksum={"OK" if cs_ok else "FAIL"}')
+        if not cs_ok:
             all_valid = False
             continue
         try:
             p = decrypt_pokemon(raw)
-        except Exception:
+        except Exception as exc:
+            print(f'[struct_diag]   slot {i}: decrypt error: {exc}')
             all_valid = False
             continue
+        print(f'[struct_diag]   slot {i}: species={p["species"]}  level={p["level"]}  '
+              f'hp={p["current_hp"]}/{p["max_hp"]}  status={p["status"]!r}  valid={1 <= p["species"] <= MAX_VALID_SPECIES}')
         if p['species'] == 0 or p['species'] > MAX_VALID_SPECIES:
+            print(f'[struct_diag]   slot {i}: skipped (species out of range)')
             continue
         p['gender'] = _gender_from_pid(p['pid'], p['species'], core)
         team.append(p)
@@ -516,14 +567,17 @@ def to_showdown(
     abilities_db: dict,
 ) -> str:
     """Format a parsed Pokémon dict as a Pokémon Showdown team-export entry."""
-    nat_dex = _internal_to_national_dex(pkmn['species'])
+    if GAME_MODE == 'rnb':
+        _lookup_key = str(pkmn['species'])
+    else:
+        _lookup_key = str(_internal_to_national_dex(pkmn['species']))
     name    = internal_species_name(pkmn['species'], species_db)
 
     item = ''
     if pkmn['held_item']:
         item = items_db.get(str(pkmn['held_item']), f"Item#{pkmn['held_item']}")
 
-    ability_map = abilities_db.get(str(nat_dex), {})
+    ability_map = abilities_db.get(_lookup_key, {})
     ability = ability_map.get(str(pkmn['ability_slot']),
               ability_map.get('0', 'Unknown'))
 
@@ -631,16 +685,18 @@ def _min_exp_for_level(group: int, level: int) -> int:
 
 
 def _correct_level_from_exp(species: int, exp: int, core) -> int:
-    """Compute the exact level for a box Pokémon by reading its growth-rate group from ROM.
+    """Compute the exact level for a box Pokémon from EXP.
 
-    Reads the expGroup byte from gBaseStats[species] and binary-searches for the
-    highest level L where _min_exp_for_level(group, L) <= exp.
-    Falls back to the Medium Fast approximation if the ROM read fails.
+    RnB mode: reads growth-rate group from rnb_curves.json (no ROM access needed).
+    Vanilla mode: reads expGroup byte from gBaseStats[species] in ROM.
     """
-    try:
-        group = int(core.memory.u8[BASE_STATS_ROM + species * BASE_STATS_SIZE + EXP_GROUP_OFF])
-    except Exception:
-        group = 0  # Medium Fast fallback
+    if GAME_MODE == 'rnb':
+        group = _RNB_CURVES.get(str(species), 0)
+    else:
+        try:
+            group = int(core.memory.u8[BASE_STATS_ROM + species * BASE_STATS_SIZE + EXP_GROUP_OFF])
+        except Exception:
+            group = 0
     if exp <= 0:
         return 1
     lo, hi = 1, 100
@@ -844,10 +900,11 @@ def log_player_pokemon(
     team : list of dicts from read_player_team()
     boxes: list of 14 slot-lists from read_player_box()
     """
-    with open(SPECIES_JSON)   as f: species_db   = json.load(f)
-    with open(MOVES_JSON)     as f: moves_db     = json.load(f)
-    with open(ITEMS_JSON)     as f: items_db     = json.load(f)
-    with open(ABILITIES_JSON) as f: abilities_db = json.load(f)
+    _paths = get_game_json_paths()
+    with open(_paths['species'])   as f: species_db   = json.load(f)
+    with open(_paths['moves'])     as f: moves_db     = json.load(f)
+    with open(_paths['items'])     as f: items_db     = json.load(f)
+    with open(_paths['abilities']) as f: abilities_db = json.load(f)
 
     box_total = sum(len(sl) for sl in boxes)
     timestamp = datetime.now().isoformat(timespec='seconds')
@@ -936,10 +993,11 @@ def log_team(team: list, log_file: str = LOG_FILE,
     Format a team (from read_enemy_team) as a Showdown export and write to log_file.
     Loads the JSON lookup tables from the paths defined at module level.
     """
-    with open(SPECIES_JSON)   as f: species_db   = json.load(f)
-    with open(MOVES_JSON)     as f: moves_db     = json.load(f)
-    with open(ITEMS_JSON)     as f: items_db     = json.load(f)
-    with open(ABILITIES_JSON) as f: abilities_db = json.load(f)
+    _paths = get_game_json_paths()
+    with open(_paths['species'])   as f: species_db   = json.load(f)
+    with open(_paths['moves'])     as f: moves_db     = json.load(f)
+    with open(_paths['items'])     as f: items_db     = json.load(f)
+    with open(_paths['abilities']) as f: abilities_db = json.load(f)
 
     entries = [
         to_showdown(p, species_db, moves_db, items_db, abilities_db)

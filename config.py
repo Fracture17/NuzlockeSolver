@@ -1,8 +1,15 @@
+GAME_MODE = 'rnb'   # 'rnb' or 'vanilla'
+
 # ─── External dependency paths — edit these for your machine ──────────────────
 import os as _os, sys as _sys
 
-ROM_PATH    = "/home/Fracture/Downloads/emerald.gba"
-SAVE_FILE   = "/home/Fracture/Downloads/emerald.sav"
+if GAME_MODE == 'rnb':
+    ROM_PATH = "/home/Fracture/Downloads/RunNBun.gba"
+    SAVE_FILE = "/home/Fracture/Downloads/RunNBun.sav"
+else:
+    ROM_PATH    = "/home/Fracture/Downloads/emerald.gba"
+    SAVE_FILE   = "/home/Fracture/Downloads/emerald.sav"
+
 NODE_SCRIPT = "/home/Fracture/WebstormProjects/pokemon-showdown-master/Connection.js"
 
 # Prefer mgba_build/ bundled inside this project; fall back to a system build path.
