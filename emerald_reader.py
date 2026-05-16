@@ -31,7 +31,8 @@ from datetime import datetime
 
 # ─── Standalone-mode file paths ───────────────────────────────────────────────
 from config import ROM_PATH, SAVE_FILE, GAME_MODE
-_ADDR_OFFSET = 0xA54 if GAME_MODE == 'rnb' else 0
+_ADDR_OFFSET        = 0xA54 if GAME_MODE == 'rnb' else 0   # party / PC / text structs
+_BATTLE_ADDR_OFFSET = 0xC24 if GAME_MODE == 'rnb' else 0   # battle-engine structs (different relocation)
 
 _HERE      = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE       = os.path.join(_HERE, "OpponentTeam.txt")
@@ -113,9 +114,13 @@ EWRAM_SIZE    = 0x40000      # 256 KB
 RAM_DUMP_FILE = os.path.join(_HERE, "ram_ewram.bin")
 
 # ─── Battle-active structs (addresses from pokeemerald.sym) ──────────────────
+# All battle-engine structs are relocated by _BATTLE_ADDR_OFFSET in RnB (0xC24),
+# which differs from the party/PC offset (_ADDR_OFFSET = 0xA54).
+# Confirmed: gBattleCommunication vanilla 0x02024332 → RnB 0x0202370E (delta 0xC24).
+#
 # gBattleMons: BattlePokemon[4], 0x58 bytes each.  [0]=player, [1]=opponent
 # BATTLE_MONS_ADDR     = 0x02024084  # vanilla Emerald US v1.0
-BATTLE_MONS_ADDR     = 0x02024084 - _ADDR_OFFSET
+BATTLE_MONS_ADDR     = 0x02024084 - _BATTLE_ADDR_OFFSET
 BATTLE_MON_SIZE      = 0x58        # sizeof(BattlePokemon)
 BATTLE_MON_MOVES_OFF   = 0x0C      # u16[4] moves at struct offset 0x0C (after species + 5 stats)
 BATTLE_MON_STATUS2_OFF = 0x50      # u32 volatile-status flags (status2) at struct offset 0x50
@@ -127,12 +132,12 @@ STATUS2_CURSED    = 0x00002000     # bit 13: Pokémon is under Curse
 # gLastMoves: u16[4], last move ID used by each battler. [0]=player, [1]=opponent.
 # Valid only during turn resolution; reset at the start of each new turn.
 # LAST_MOVES_ADDR      = 0x02024248  # vanilla Emerald US v1.0
-LAST_MOVES_ADDR      = 0x02024248 - _ADDR_OFFSET
+LAST_MOVES_ADDR      = 0x02024248 - _BATTLE_ADDR_OFFSET
 
 # gLastUsedItem: u16; set when any battler uses a battle item.  Does NOT reset to 0 between
 # turns — must be manually zeroed after reading to support detection of repeated item use.
 # LAST_USED_ITEM_ADDR  = 0x02024208  # vanilla Emerald US v1.0
-LAST_USED_ITEM_ADDR  = 0x02024208 - _ADDR_OFFSET
+LAST_USED_ITEM_ADDR  = 0x02024208 - _BATTLE_ADDR_OFFSET
 
 # Item IDs that trainers can use from their bag during battle (Gen 3 Emerald, items.h).
 # Held items (berries, etc.) also trigger gLastUsedItem — filter to only these.
@@ -160,19 +165,19 @@ TRAINER_BATTLE_ITEM_PS_IDS = {
 # and drops to 0 specifically when the forced-switch party screen is showing.
 # Value is also 0 before the first action menu (ps_state guard prevents false triggers then).
 # BATTLER_FAINTED_ADDR = 0x0202420d  # vanilla Emerald US v1.0
-BATTLER_FAINTED_ADDR = 0x0202420d - _ADDR_OFFSET
+BATTLER_FAINTED_ADDR = 0x0202420d - _BATTLE_ADDR_OFFSET
 
 # gBattlerPartyIndexes: u16[4], active party slot per battler. [0]=player, [1]=opponent
 # BATTLER_PARTY_INDEXES_ADDR = 0x0202406e  # vanilla Emerald US v1.0
-BATTLER_PARTY_INDEXES_ADDR = 0x0202406e - _ADDR_OFFSET
+BATTLER_PARTY_INDEXES_ADDR = 0x0202406e - _BATTLE_ADDR_OFFSET
 
 # gBattleCommunication: u8[8]; [0]==2 when player is at the main battle action menu
 # BATTLE_COMM_ADDR = 0x02024332  # vanilla Emerald US v1.0
-BATTLE_COMM_ADDR = 0x02024332 - _ADDR_OFFSET
+BATTLE_COMM_ADDR = 0x02024332 - _BATTLE_ADDR_OFFSET
 
 # gBattleOutcome: u8; non-zero when battle has ended (1=won, 2=lost, 3=ran, 4=caught, 5=draw)
 # BATTLE_OUTCOME_ADDR = 0x0202433a  # vanilla Emerald US v1.0
-BATTLE_OUTCOME_ADDR = 0x0202433a - _ADDR_OFFSET
+BATTLE_OUTCOME_ADDR = 0x0202433a - _BATTLE_ADDR_OFFSET
 
 # ─── Internal species ID → name (GBA internal ordering, NOT national dex) ────
 # Gen 1+2 (IDs 1–251): internal ID == national dex, looked up via species_db at runtime.

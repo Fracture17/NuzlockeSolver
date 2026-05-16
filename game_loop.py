@@ -506,36 +506,44 @@ def main():
                     threading.Thread(target=_battle_loop_wrapper, daemon=True).start()
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_F6:
                 # ── Battle address scanner ──────────────────────────────────
-                # Press F6 while standing at the FIGHT/POKEMON/BAG/RUN action
-                # menu during a trainer battle.  Scans all of EWRAM and reports
-                # every address where the byte == 2 (gBattleCommunication[0]
-                # candidate) while the adjacent gBattleOutcome candidate is 0.
-                # Repeat with gBattlerFainted == 0 to further filter the list.
-                # Cross-check the printed offsets against the vanilla addresses
-                # to determine the RnB relocation delta.
-                print('[F6] Scanning EWRAM for battle address candidates...')
-                print('[F6]   Conditions: byte==2 (comm candidate) AND')
-                print('[F6]   byte 8 bytes later == 0 (outcome candidate) AND')
-                print('[F6]   byte -0x53 bytes earlier == 0 (fainted candidate)')
-                EWRAM_BASE_SCAN = 0x02000000
-                EWRAM_SIZE_SCAN = 0x40000  # 256 KB
-                # vanilla relative offsets from gBattleCommunication:
-                #   gBattleOutcome  = gBattleCommunication + 8
-                #   gBattlerFainted = gBattleCommunication - 0x179  (0x02024332 - 0x0202420d = 0x125... wait)
-                # Recompute from vanilla:
+                # Press F6 at the FIGHT/POKEMON/BAG/RUN action menu during a
+                # trainer battle (BEFORE pressing FIGHT).
+                #
+                # Constraints applied to each candidate for gBattleCommunication:
+                #   [+0x000] byte == 2           (action-selection state)
+                #   [+0x008] byte == 0           (gBattleOutcome: battle in progress)
+                #   [-0x125] byte == 0           (gBattlerFainted: none fainted yet)
+                #   [-0x2AE] u16 == active spc   (gBattleMons[0].species; vanilla rel offset)
+                #
+                # Vanilla base addresses used for delta reporting:
                 #   gBattleCommunication = 0x02024332
-                #   gBattleOutcome       = 0x0202433a  → +0x08
-                #   gBattlerFainted      = 0x0202420d  → -0x125
-                _OUTCOME_REL  =  0x08
-                _FAINTED_REL  = -0x125
+                #   gBattleMons[0]       = 0x02024084  (species at +0, so -0x2AE from comm)
+                _VANILLA_COMM   = 0x02024332
+                _OUTCOME_REL    =  0x008
+                _FAINTED_REL    = -0x125
+                _SPECIES_REL    = -0x2AE   # gBattleMons[0].species u16
+
+                EWRAM_BASE_SCAN = 0x02000000
+                EWRAM_SIZE_SCAN = 0x40000   # 256 KB
+
+                # Read the active player species for the constraint filter.
+                with emu_lock:
+                    _pt = read_player_team(core)
+                active_species = _pt[0]['species'] if _pt else None
+
+                print('[F6] Scanning EWRAM for battle address candidates...')
+                print(f'[F6]   byte==2 AND +0x8==0 AND -0x125==0 AND -0x2AE(u16)=={active_species}')
+
                 with emu_lock:
                     ewram = _read_bytes(core, EWRAM_BASE_SCAN, EWRAM_SIZE_SCAN)
+
                 candidates = []
                 for off in range(EWRAM_SIZE_SCAN):
                     if ewram[off] != 2:
                         continue
                     out_off = off + _OUTCOME_REL
                     fnt_off = off + _FAINTED_REL
+                    spc_off = off + _SPECIES_REL
                     if not (0 <= out_off < EWRAM_SIZE_SCAN):
                         continue
                     if not (0 <= fnt_off < EWRAM_SIZE_SCAN):
@@ -544,15 +552,30 @@ def main():
                         continue
                     if ewram[fnt_off] != 0:
                         continue
+                    # Species constraint (strongest filter — skip if species unknown)
+                    if active_species is not None:
+                        if not (0 <= spc_off + 1 < EWRAM_SIZE_SCAN):
+                            continue
+                        spc_val = ewram[spc_off] | (ewram[spc_off + 1] << 8)
+                        if spc_val != active_species:
+                            continue
                     addr = EWRAM_BASE_SCAN + off
                     candidates.append(addr)
+
                 if candidates:
                     print(f'[F6] Found {len(candidates)} candidate(s) for gBattleCommunication:')
                     for addr in candidates:
-                        delta = addr - 0x02024332
-                        print(f'  0x{addr:08X}  (vanilla delta: {delta:+d} = {delta:#x})')
+                        delta = addr - _VANILLA_COMM
+                        spc_addr = addr + _SPECIES_REL
+                        print(f'  0x{addr:08X}  (vanilla delta: {delta:+d} = {delta:#x})'
+                              f'  gBattleMons[0] @ 0x{spc_addr:08X}')
                 else:
-                    print('[F6] No candidates found — are you at the action menu in a battle?')
+                    print('[F6] No candidates found.')
+                    if active_species is None:
+                        print('[F6]   Could not read player team — party may be empty.')
+                    else:
+                        print(f'[F6]   Active species was {active_species}. Try pressing F6 while the')
+                        print(f'[F6]   "What will X do?" prompt is on screen (before pressing FIGHT).')
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_F2:
                 print("[game_loop] F2 pressed — reading opponent team...")
                 with emu_lock:
