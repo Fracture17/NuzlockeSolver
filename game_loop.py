@@ -60,6 +60,7 @@ import tkinter as tk
 import tkinter.filedialog
 
 import battle_mode
+from battle_state_tracker import read_battle_snapshot, diff_snapshots, BattleSnapshot
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 from config import ROM_PATH, SAVE_FILE, NODE_SCRIPT, GAME_MODE
@@ -459,6 +460,7 @@ def main():
 
     # ── Battle detection state ───────────────────────────────────────────────
     last_enemy_count = 0
+    _prev_battle_snapshot = BattleSnapshot()
 
     # ── Main loop ───────────────────────────────────────────────────────────
     while running[0]:
@@ -635,6 +637,7 @@ def main():
             print(f'[battle_addr] gEnemyPartyCount @ 0x{ENEMY_PARTY_COUNT_ADDR:08X} = {enemy_count}')
         if enemy_count > 0 and last_enemy_count == 0:
             print(f"[game_loop] Battle start detected — {enemy_count} opponent Pokémon")
+            _prev_battle_snapshot = BattleSnapshot()  # reset on battle start
             with emu_lock:
                 team = read_enemy_team(core)
             log_team(team)
@@ -642,7 +645,18 @@ def main():
                 player_team = read_player_team(core)
                 boxes = read_player_box(core)
             log_player_pokemon(player_team, boxes)
+        if enemy_count == 0 and last_enemy_count > 0:
+            _prev_battle_snapshot = BattleSnapshot()  # reset on battle end
         last_enemy_count = enemy_count
+
+        # Battle state tracking — read snapshot and print any changes
+        if enemy_count > 0:
+            with emu_lock:
+                _curr_snapshot = read_battle_snapshot(core)
+            for line in diff_snapshots(_prev_battle_snapshot, _curr_snapshot, species_db):
+                print(f'[battle_state] {line}')
+            if _curr_snapshot.valid:
+                _prev_battle_snapshot = _curr_snapshot
 
         # Render current frame
         # Note: if colors look wrong (green tint etc.), change 'RGBA' to 'BGRA' below.
