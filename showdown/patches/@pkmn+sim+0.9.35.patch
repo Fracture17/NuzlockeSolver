@@ -1,0 +1,804 @@
+diff --git a/node_modules/@pkmn/sim/build/cjs/data/conditions.js b/node_modules/@pkmn/sim/build/cjs/data/conditions.js
+index b41bba4..e838ce0 100644
+--- a/node_modules/@pkmn/sim/build/cjs/data/conditions.js
++++ b/node_modules/@pkmn/sim/build/cjs/data/conditions.js
+@@ -44,7 +44,7 @@ exports.Conditions = {
+         },
+         onBeforeMovePriority: 1,
+         onBeforeMove(pokemon) {
+-            if (this.randomChance(1, 4)) {
++            if (this.isBadRNG(pokemon.side.n) ? true : this.isGoodRNG(pokemon.side.n) ? false : this.randomChance(1, 4)) {
+                 this.add('cant', pokemon, 'par');
+                 return false;
+             }
+@@ -66,25 +66,42 @@ exports.Conditions = {
+             // 1-3 turns
+             this.effectState.startTime = this.random(2, 5);
+             this.effectState.time = this.effectState.startTime;
++            this.effectState.turnsAsleep = 0;
+             if (target.removeVolatile('nightmare')) {
+                 this.add('-end', target, 'Nightmare', '[silent]');
+             }
+         },
+         onBeforeMovePriority: 10,
+         onBeforeMove(pokemon, target, move) {
+-            if (pokemon.hasAbility('earlybird')) {
+-                pokemon.statusState.time--;
+-            }
+-            pokemon.statusState.time--;
+-            if (pokemon.statusState.time <= 0) {
+-                pokemon.cureStatus();
+-                return;
++            const sideN = pokemon.side.n;
++            if (this.isBadRNG(sideN) || this.isGoodRNG(sideN)) {
++                pokemon.statusState.turnsAsleep = (pokemon.statusState.turnsAsleep || 0) + 1;
++                const threshold = this.isBadRNG(sideN) ? 3 : 1;
++                if (pokemon.statusState.turnsAsleep >= threshold) {
++                    pokemon.cureStatus();
++                    return;
++                }
++                this.add('cant', pokemon, 'slp');
++                if (move.sleepUsable) {
++                    return;
++                }
++                return false;
+             }
+-            this.add('cant', pokemon, 'slp');
+-            if (move.sleepUsable) {
+-                return;
++            else {
++                if (pokemon.hasAbility('earlybird')) {
++                    pokemon.statusState.time--;
++                }
++                pokemon.statusState.time--;
++                if (pokemon.statusState.time <= 0) {
++                    pokemon.cureStatus();
++                    return;
++                }
++                this.add('cant', pokemon, 'slp');
++                if (move.sleepUsable) {
++                    return;
++                }
++                return false;
+             }
+-            return false;
+         },
+     },
+     frz: {
+@@ -106,7 +123,7 @@ exports.Conditions = {
+         onBeforeMove(pokemon, target, move) {
+             if (move.flags['defrost'])
+                 return;
+-            if (this.randomChance(1, 5)) {
++            if (this.isGoodRNG(pokemon.side.n) ? true : this.isBadRNG(pokemon.side.n) ? false : this.randomChance(1, 5)) {
+                 pokemon.cureStatus();
+                 return;
+             }
+@@ -187,28 +204,51 @@ exports.Conditions = {
+             }
+             const min = sourceEffect?.id === 'axekick' ? 3 : 2;
+             this.effectState.time = this.random(min, 6);
++            this.effectState.turnsConfused = 0;
+         },
+         onEnd(target) {
+             this.add('-end', target, 'confusion');
+         },
+         onBeforeMovePriority: 3,
+         onBeforeMove(pokemon) {
+-            pokemon.volatiles['confusion'].time--;
+-            if (!pokemon.volatiles['confusion'].time) {
+-                pokemon.removeVolatile('confusion');
+-                return;
++            const sideN = pokemon.side.n;
++            if (this.isBadRNG(sideN) || this.isGoodRNG(sideN)) {
++                pokemon.volatiles['confusion'].turnsConfused = (pokemon.volatiles['confusion'].turnsConfused || 0) + 1;
++                const threshold = this.isBadRNG(sideN) ? 5 : 2;
++                if (pokemon.volatiles['confusion'].turnsConfused >= threshold) {
++                    pokemon.removeVolatile('confusion');
++                    return;
++                }
++                this.add('-activate', pokemon, 'confusion');
++                if (this.isGoodRNG(sideN)) {
++                    return;
++                }
++                this.activeTarget = pokemon;
++                const damage = this.actions.getConfusionDamage(pokemon, 40);
++                if (typeof damage !== 'number')
++                    throw new Error("Confusion damage not dealt");
++                const activeMove = { id: this.toID('confused'), effectType: 'Move', type: '???' };
++                this.damage(damage, pokemon, pokemon, activeMove);
++                return false;
+             }
+-            this.add('-activate', pokemon, 'confusion');
+-            if (!this.randomChance(33, 100)) {
+-                return;
++            else {
++                pokemon.volatiles['confusion'].time--;
++                if (!pokemon.volatiles['confusion'].time) {
++                    pokemon.removeVolatile('confusion');
++                    return;
++                }
++                this.add('-activate', pokemon, 'confusion');
++                if (!this.randomChance(33, 100)) {
++                    return;
++                }
++                this.activeTarget = pokemon;
++                const damage = this.actions.getConfusionDamage(pokemon, 40);
++                if (typeof damage !== 'number')
++                    throw new Error("Confusion damage not dealt");
++                const activeMove = { id: this.toID('confused'), effectType: 'Move', type: '???' };
++                this.damage(damage, pokemon, pokemon, activeMove);
++                return false;
+             }
+-            this.activeTarget = pokemon;
+-            const damage = this.actions.getConfusionDamage(pokemon, 40);
+-            if (typeof damage !== 'number')
+-                throw new Error("Confusion damage not dealt");
+-            const activeMove = { id: this.toID('confused'), effectType: 'Move', type: '???' };
+-            this.damage(damage, pokemon, pokemon, activeMove);
+-            return false;
+         },
+     },
+     flinch: {
+diff --git a/node_modules/@pkmn/sim/build/cjs/data/items.js b/node_modules/@pkmn/sim/build/cjs/data/items.js
+index f8866f5..25b070f 100644
+--- a/node_modules/@pkmn/sim/build/cjs/data/items.js
++++ b/node_modules/@pkmn/sim/build/cjs/data/items.js
+@@ -3320,6 +3320,11 @@ exports.Items = {
+             }
+         },
+         onEat(pokemon) {
++            const curedStatus = pokemon.status || (pokemon.volatiles['confusion'] ? 'confusion' : null);
++            if (curedStatus) {
++                if (pokemon.side.n === 0) this.p1LumBlocked = curedStatus;
++                else this.p2LumBlocked = curedStatus;
++            }
+             pokemon.cureStatus();
+             pokemon.removeVolatile('confusion');
+         },
+@@ -4716,7 +4721,7 @@ exports.Items = {
+         onFractionalPriority(priority, pokemon, target, move) {
+             if (move.category === "Status" && pokemon.hasAbility("myceliummight"))
+                 return;
+-            if (priority <= 0 && this.randomChance(1, 5)) {
++            if (priority <= 0 && (this.isGoodRNG(pokemon.side.n) ? true : this.isBadRNG(pokemon.side.n) ? false : this.randomChance(1, 5))) {
+                 this.add('-activate', pokemon, 'item: Quick Claw');
+                 return 0.1;
+             }
+@@ -7779,5 +7784,80 @@ exports.Items = {
+         gen: 8,
+         isNonstandard: "CAP",
+     },
++    potion: {
++        name: "Potion", num: 17, gen: 1,
++        isNonstandard: "Unobtainable",
++        bagUse: { heal: 20 },
++    },
++    superpotion: {
++        name: "Super Potion", num: 18, gen: 1,
++        isNonstandard: "Unobtainable",
++        bagUse: { heal: 60 },
++    },
++    hyperpotion: {
++        name: "Hyper Potion", num: 19, gen: 1,
++        isNonstandard: "Unobtainable",
++        bagUse: { heal: 120 },
++    },
++    maxpotion: {
++        name: "Max Potion", num: 20, gen: 1,
++        isNonstandard: "Unobtainable",
++        bagUse: { heal: -1 },
++    },
++    fullrestore: {
++        name: "Full Restore", num: 23, gen: 1,
++        isNonstandard: "Unobtainable",
++        bagUse: { heal: -1, cureStatus: true },
++    },
++    freshwater: {
++        name: "Fresh Water", num: 21, gen: 1,
++        isNonstandard: "Unobtainable",
++        bagUse: { heal: 30 },
++    },
++    sodapop: {
++        name: "Soda Pop", num: 22, gen: 1,
++        isNonstandard: "Unobtainable",
++        bagUse: { heal: 50 },
++    },
++    lemonade: {
++        name: "Lemonade", num: 55, gen: 1,
++        isNonstandard: "Unobtainable",
++        bagUse: { heal: 70 },
++    },
++    moomoomilk: {
++        name: "Moomoo Milk", num: 101, gen: 2,
++        isNonstandard: "Unobtainable",
++        bagUse: { heal: 100 },
++    },
++    antidote: {
++        name: "Antidote", num: 12, gen: 1,
++        isNonstandard: "Unobtainable",
++        bagUse: { cureStatusList: ['psn', 'tox'] },
++    },
++    burnheal: {
++        name: "Burn Heal", num: 13, gen: 1,
++        isNonstandard: "Unobtainable",
++        bagUse: { cureStatusList: ['brn'] },
++    },
++    iceheal: {
++        name: "Ice Heal", num: 14, gen: 1,
++        isNonstandard: "Unobtainable",
++        bagUse: { cureStatusList: ['frz'] },
++    },
++    awakening: {
++        name: "Awakening", num: 15, gen: 1,
++        isNonstandard: "Unobtainable",
++        bagUse: { cureStatusList: ['slp'] },
++    },
++    paralyzeheal: {
++        name: "Paralyze Heal", num: 16, gen: 1,
++        isNonstandard: "Unobtainable",
++        bagUse: { cureStatusList: ['par'] },
++    },
++    fullheal: {
++        name: "Full Heal", num: 26, gen: 1,
++        isNonstandard: "Unobtainable",
++        bagUse: { cureStatus: true },
++    },
+ };
+ //# sourceMappingURL=items.js.map
+\ No newline at end of file
+diff --git a/node_modules/@pkmn/sim/build/cjs/data/mods/gen3/conditions.js b/node_modules/@pkmn/sim/build/cjs/data/mods/gen3/conditions.js
+index ace183c..f056663 100644
+--- a/node_modules/@pkmn/sim/build/cjs/data/mods/gen3/conditions.js
++++ b/node_modules/@pkmn/sim/build/cjs/data/mods/gen3/conditions.js
+@@ -16,6 +16,7 @@ exports.Conditions = {
+             this.effectState.time = this.random(2, 6);
+             // Turns spent using Sleep Talk/Snore immediately before switching out while asleep
+             this.effectState.skippedTime = 0;
++            this.effectState.turnsAsleep = 0;
+             if (target.removeVolatile('nightmare')) {
+                 this.add('-end', target, 'Nightmare', '[silent]');
+             }
+@@ -26,21 +27,37 @@ exports.Conditions = {
+         },
+         onBeforeMovePriority: 10,
+         onBeforeMove(pokemon, target, move) {
+-            if (pokemon.hasAbility('earlybird')) {
+-                pokemon.statusState.time--;
+-            }
+-            pokemon.statusState.time--;
+-            if (pokemon.statusState.time <= 0) {
+-                pokemon.cureStatus();
+-                return;
++            const sideN = pokemon.side.n;
++            if (this.isBadRNG(sideN) || this.isGoodRNG(sideN)) {
++                pokemon.statusState.turnsAsleep = (pokemon.statusState.turnsAsleep || 0) + 1;
++                const threshold = this.isBadRNG(sideN) ? 4 : 1;
++                if (pokemon.statusState.turnsAsleep >= threshold) {
++                    pokemon.cureStatus();
++                    return;
++                }
++                this.add('cant', pokemon, 'slp');
++                if (move.sleepUsable) {
++                    return;
++                }
++                return false;
+             }
+-            this.add('cant', pokemon, 'slp');
+-            if (move.sleepUsable) {
+-                this.effectState.skippedTime++;
+-                return;
++            else {
++                if (pokemon.hasAbility('earlybird')) {
++                    pokemon.statusState.time--;
++                }
++                pokemon.statusState.time--;
++                if (pokemon.statusState.time <= 0) {
++                    pokemon.cureStatus();
++                    return;
++                }
++                this.add('cant', pokemon, 'slp');
++                if (move.sleepUsable) {
++                    this.effectState.skippedTime++;
++                    return;
++                }
++                this.effectState.skippedTime = 0;
++                return false;
+             }
+-            this.effectState.skippedTime = 0;
+-            return false;
+         },
+     },
+     frz: {
+diff --git a/node_modules/@pkmn/sim/build/cjs/data/mods/gen3/scripts.js b/node_modules/@pkmn/sim/build/cjs/data/mods/gen3/scripts.js
+index b8abebb..94c2b87 100644
+--- a/node_modules/@pkmn/sim/build/cjs/data/mods/gen3/scripts.js
++++ b/node_modules/@pkmn/sim/build/cjs/data/mods/gen3/scripts.js
+@@ -27,7 +27,7 @@ exports.Scripts = {
+             if (trickRoomCheck) {
+                 speed = -speed;
+             }
+-            if (this.battle.quickClawRoll && this.hasItem('quickclaw')) {
++            if ((this.battle.isGoodRNG(this.side.n) ? true : this.battle.isBadRNG(this.side.n) ? false : this.battle.quickClawRoll) && this.hasItem('quickclaw')) {
+                 speed = 65535;
+             }
+             return speed;
+diff --git a/node_modules/@pkmn/sim/build/cjs/data/mods/gen4/conditions.js b/node_modules/@pkmn/sim/build/cjs/data/mods/gen4/conditions.js
+index 17a3aa4..f3cb676 100644
+--- a/node_modules/@pkmn/sim/build/cjs/data/mods/gen4/conditions.js
++++ b/node_modules/@pkmn/sim/build/cjs/data/mods/gen4/conditions.js
+@@ -68,30 +68,54 @@ exports.Conditions = {
+     confusion: {
+         inherit: true,
+         onBeforeMove(pokemon) {
+-            pokemon.volatiles['confusion'].time--;
+-            if (!pokemon.volatiles['confusion'].time) {
+-                pokemon.removeVolatile('confusion');
+-                return;
++            const sideN = pokemon.side.n;
++            if (this.isBadRNG(sideN) || this.isGoodRNG(sideN)) {
++                pokemon.volatiles['confusion'].turnsConfused = (pokemon.volatiles['confusion'].turnsConfused || 0) + 1;
++                const threshold = this.isBadRNG(sideN) ? 5 : 2;
++                if (pokemon.volatiles['confusion'].turnsConfused >= threshold) {
++                    pokemon.removeVolatile('confusion');
++                    return;
++                }
++                this.add('-activate', pokemon, 'confusion');
++                if (this.isGoodRNG(sideN)) {
++                    return;
++                }
++                const damage = this.actions.getDamage(pokemon, pokemon, 40);
++                if (typeof damage !== 'number')
++                    throw new Error("Confusion damage not dealt");
++                this.damage(damage, pokemon, pokemon, {
++                    id: 'confused',
++                    effectType: 'Move',
++                    type: '???',
++                });
++                return false;
+             }
+-            this.add('-activate', pokemon, 'confusion');
+-            if (this.randomChance(1, 2)) {
+-                return;
++            else {
++                pokemon.volatiles['confusion'].time--;
++                if (!pokemon.volatiles['confusion'].time) {
++                    pokemon.removeVolatile('confusion');
++                    return;
++                }
++                this.add('-activate', pokemon, 'confusion');
++                if (this.randomChance(1, 2)) {
++                    return;
++                }
++                const damage = this.actions.getDamage(pokemon, pokemon, 40);
++                if (typeof damage !== 'number')
++                    throw new Error("Confusion damage not dealt");
++                this.damage(damage, pokemon, pokemon, {
++                    id: 'confused',
++                    effectType: 'Move',
++                    type: '???',
++                });
++                return false;
+             }
+-            const damage = this.actions.getDamage(pokemon, pokemon, 40);
+-            if (typeof damage !== 'number')
+-                throw new Error("Confusion damage not dealt");
+-            this.damage(damage, pokemon, pokemon, {
+-                id: 'confused',
+-                effectType: 'Move',
+-                type: '???',
+-            });
+-            return false;
+         },
+     },
+     frz: {
+         inherit: true,
+         onBeforeMove(pokemon, target, move) {
+-            if (this.randomChance(1, 5)) {
++            if (this.isGoodRNG(pokemon.side.n) ? true : this.isBadRNG(pokemon.side.n) ? false : this.randomChance(1, 5)) {
+                 pokemon.cureStatus();
+                 return;
+             }
+diff --git a/node_modules/@pkmn/sim/build/cjs/data/moves.js b/node_modules/@pkmn/sim/build/cjs/data/moves.js
+index 2f5045f..94e8c89 100644
+--- a/node_modules/@pkmn/sim/build/cjs/data/moves.js
++++ b/node_modules/@pkmn/sim/build/cjs/data/moves.js
+@@ -781,7 +781,7 @@ exports.Moves = {
+             onBeforeMovePriority: 2,
+             onBeforeMove(pokemon, target, move) {
+                 this.add('-activate', pokemon, 'move: Attract', '[of] ' + this.effectState.source);
+-                if (this.randomChance(1, 2)) {
++                if (this.isBadRNG(pokemon.side.n) ? true : this.isGoodRNG(pokemon.side.n) ? false : this.randomChance(1, 2)) {
+                     this.add('cant', pokemon, 'Attract');
+                     return false;
+                 }
+diff --git a/node_modules/@pkmn/sim/build/cjs/sim/battle-actions.js b/node_modules/@pkmn/sim/build/cjs/sim/battle-actions.js
+index b23dd1f..7e93f25 100644
+--- a/node_modules/@pkmn/sim/build/cjs/sim/battle-actions.js
++++ b/node_modules/@pkmn/sim/build/cjs/sim/battle-actions.js
+@@ -700,7 +700,18 @@ class BattleActions {
+             else {
+                 accuracy = this.battle.runEvent('Accuracy', target, pokemon, move, accuracy);
+             }
+-            if (accuracy !== true && !this.battle.randomChance(accuracy, 100)) {
++            const sideN = pokemon.side.n;
++            const naturalAccuracy = accuracy === true ? 1.0 : accuracy / 100;
++            if (sideN === 0) this.battle.p1AccuracyChance = naturalAccuracy;
++            else this.battle.p2AccuracyChance = naturalAccuracy;
++            const accuracyHit = accuracy === true || (
++                this.battle.isForceHit(sideN) && accuracy > 0 ? true
++                    : this.battle.isForceMiss(sideN) && accuracy < 100 ? false
++                    : this.battle.isGoodRNG(sideN) ? true
++                    : this.battle.isBadRNG(sideN) ? accuracy >= 100
++                    : this.battle.randomChance(accuracy, 100)
++            );
++            if (!accuracyHit) {
+                 if (move.smartTarget) {
+                     move.smartTarget = false;
+                 }
+@@ -912,7 +923,10 @@ class BattleActions {
+                 accuracy = this.battle.runEvent('ModifyAccuracy', target, pokemon, move, accuracy);
+                 if (!move.alwaysHit) {
+                     accuracy = this.battle.runEvent('Accuracy', target, pokemon, move, accuracy);
+-                    if (accuracy !== true && !this.battle.randomChance(accuracy, 100))
++                    if (accuracy !== true && !(
++                        this.battle.isGoodRNG(pokemon.side.n) ? true
++                            : this.battle.isBadRNG(pokemon.side.n) ? accuracy >= 100
++                            : this.battle.randomChance(accuracy, 100)))
+                         break;
+                 }
+             }
+@@ -1327,8 +1341,19 @@ class BattleActions {
+                 const secondaryRoll = this.battle.random(100);
+                 // User stat boosts or target stat drops can possibly overflow if it goes beyond 256 in Gen 8 or prior
+                 const secondaryOverflow = (secondary.boosts || secondary.self) && this.battle.gen <= 8;
+-                if (typeof secondary.chance === 'undefined' ||
+-                    secondaryRoll < (secondaryOverflow ? secondary.chance % 256 : secondary.chance)) {
++                const secondaryChance = secondaryOverflow ? secondary.chance % 256 : secondary.chance;
++                const sourceSideN = source.side.n;
++                const naturalSecondaryChance = typeof secondaryChance === 'undefined' ? 1.0 : secondaryChance / 100;
++                if (sourceSideN === 0) this.battle.p1SecondaryChance = naturalSecondaryChance;
++                else this.battle.p2SecondaryChance = naturalSecondaryChance;
++                const secondaryTriggered =
++                    this.battle.isForceEffect(sourceSideN) && (typeof secondaryChance === 'undefined' || secondaryChance > 0) ? true
++                        : this.battle.isNoEffect(sourceSideN) && typeof secondaryChance !== 'undefined' && secondaryChance < 100 ? false
++                        : this.battle.isGoodRNG(sourceSideN) ? true
++                        : this.battle.isBadRNG(sourceSideN)
++                            ? typeof secondary.chance !== 'undefined' && secondaryChance >= 100
++                            : (typeof secondary.chance === 'undefined' || secondaryRoll < secondaryChance);
++                if (secondaryTriggered) {
+                     this.moveHit(target, source, move, secondary, true, isSelf);
+                 }
+             }
+@@ -1613,8 +1638,20 @@ class BattleActions {
+         const moveHit = target.getMoveHitData(move);
+         moveHit.crit = move.willCrit || false;
+         if (move.willCrit === undefined) {
+-            if (critRatio) {
+-                moveHit.crit = this.battle.randomChance(1, critMult[critRatio]);
++            const sideN = source.side.n;
++            const naturalCritChance = critRatio ? 1 / critMult[critRatio] : 0;
++            if (sideN === 0) this.battle.p1CritChance = naturalCritChance;
++            else this.battle.p2CritChance = naturalCritChance;
++            if (this.battle.isForceCrit(sideN)) {
++                moveHit.crit = true;
++            } else if (this.battle.isNoCrit(sideN) && naturalCritChance < 1) {
++                moveHit.crit = false;
++            } else if (critRatio) {
++                moveHit.crit = this.battle.isGoodRNG(sideN)
++                    ? true
++                    : this.battle.isBadRNG(sideN)
++                        ? false
++                        : this.battle.randomChance(1, critMult[critRatio]);
+             }
+         }
+         if (moveHit.crit) {
+@@ -1878,6 +1915,23 @@ class BattleActions {
+         }
+         this.battle.runEvent('AfterTerastallization', pokemon);
+     }
++    useItem(action) {
++        const { target, item } = action;
++        const bagUse = item.bagUse;
++        if (bagUse.heal) {
++            const newHP = bagUse.heal === -1 ? target.maxhp : target.hp + bagUse.heal;
++            const oldHP = target.hp;
++            target.sethp(newHP);
++            if (target.hp !== oldHP) {
++                this.battle.add('-heal', target, target.getHealth, `[from] item: ${item.name}`);
++            }
++        }
++        if (bagUse.cureStatus && target.status) {
++            target.cureStatus();
++        } else if (bagUse.cureStatusList && bagUse.cureStatusList.includes(target.status)) {
++            target.cureStatus();
++        }
++    }
+ }
+ exports.BattleActions = BattleActions;
+ //# sourceMappingURL=battle-actions.js.map
+\ No newline at end of file
+diff --git a/node_modules/@pkmn/sim/build/cjs/sim/battle-queue.js b/node_modules/@pkmn/sim/build/cjs/sim/battle-queue.js
+index fd2fdd0..aac7b91 100644
+--- a/node_modules/@pkmn/sim/build/cjs/sim/battle-queue.js
++++ b/node_modules/@pkmn/sim/build/cjs/sim/battle-queue.js
+@@ -62,6 +62,7 @@ class BattleQueue {
+                 runDynamax: 105,
+                 terastallize: 106,
+                 priorityChargeMove: 107,
++                item: 150,
+                 shift: 200,
+                 // default is 200 (for moves)
+                 residual: 300,
+@@ -76,6 +77,9 @@ class BattleQueue {
+                 }
+             }
+         }
++        if (action.choice === 'item') {
++            action.subOrder = action.pokemon.side.n === 0 ? 1 : 0;
++        }
+         if (!midTurn) {
+             if (action.choice === 'move') {
+                 if (!action.maxMove && !action.zmove && action.move.beforeTurnCallback) {
+@@ -187,7 +191,7 @@ class BattleQueue {
+     }
+     willAct() {
+         for (const action of this.list) {
+-            if (['move', 'switch', 'instaswitch', 'shift'].includes(action.choice)) {
++            if (['move', 'switch', 'instaswitch', 'shift', 'item'].includes(action.choice)) {
+                 return action;
+             }
+         }
+diff --git a/node_modules/@pkmn/sim/build/cjs/sim/battle.js b/node_modules/@pkmn/sim/build/cjs/sim/battle.js
+index d941587..9618e9e 100644
+--- a/node_modules/@pkmn/sim/build/cjs/sim/battle.js
++++ b/node_modules/@pkmn/sim/build/cjs/sim/battle.js
+@@ -77,6 +77,15 @@ class Battle {
+         // Require debug mode and explicitly passed true/false
+         this.forceRandomChance = (this.debugMode && typeof options.forceRandomChance === 'boolean') ?
+             options.forceRandomChance : null;
++        this.P1BadRNG = false;
++        this.P1GoodRNG = false;
++        this.P2BadRNG = false;
++        this.P2GoodRNG = false;
++        this.atkBoost = false;
++        this.defBoost = false;
++        this.spaBoost = false;
++        this.spdBoost = false;
++        this.speBoost = false;
+         this.deserialized = !!options.deserialized;
+         this.strictChoices = !!options.strictChoices;
+         this.formatData = this.initEffectState({ id: format.id });
+@@ -187,17 +196,41 @@ class Battle {
+     toString() {
+         return `Battle: ${this.format}`;
+     }
+-    random(m, n) {
+-        return this.prng.random(m, n);
+-    }
+-    randomChance(numerator, denominator) {
+-        if (this.forceRandomChance !== null)
+-            return this.forceRandomChance;
+-        return this.prng.randomChance(numerator, denominator);
+-    }
+-    sample(items) {
+-        return this.prng.sample(items);
+-    }
++	random(m, n) {
++		 if(this.forceAverageRandom) {
++			 if (m) m = Math.floor(m);
++			 if (n) n = Math.floor(n);
++
++			 if (m === undefined) {
++				 return 2 ** 31;
++			 } else if (!n) {
++				 return Math.floor(m / 2);
++			 } else {
++				 return Math.floor((n - m) / 2);
++			 }
++		 } else {
++			 return this.prng.random(m, n);
++		 }
++	}
++
++	randomChance(numerator, denominator) {
++		if(this.forceAverageRandom) {
++			let chance = numerator / denominator;
++			return chance >= .5;
++		} else {
++			if (this.forceRandomChance !== null) return this.forceRandomChance;
++			return this.prng.randomChance(numerator, denominator);
++		}
++	}
++
++	sample(items) {
++		if(this.forceAverageRandom) {
++			let index = Math.floor(items.length / 2);
++			return items[index];
++		} else {
++			return this.prng.sample(items);
++		}
++	}
+     /** Note that passing `undefined` resets to the starting seed, but `null` will roll a new seed */
+     resetRNG(seed = this.prngSeed) {
+         this.prng = new prng_1.PRNG(seed);
+@@ -291,7 +324,23 @@ class Battle {
+                 }
+             }
+             if (nextIndexes.length > 1) {
+-                this.prng.shuffle(list, sorted, sorted + nextIndexes.length);
++                const getTier = (sideN) => {
++                    if (this.isGoodRNG(sideN)) return 2;
++                    if (this.isBadRNG(sideN)) return 0;
++                    return 1;
++                };
++                const p1Tier = getTier(0);
++                const p2Tier = getTier(1);
++                if (p1Tier !== p2Tier) {
++                    const slice = list.slice(sorted, sorted + nextIndexes.length);
++                    slice.sort((a, b) => getTier(b.pokemon?.side.n ?? 0) - getTier(a.pokemon?.side.n ?? 0));
++                    for (let i = 0; i < slice.length; i++) {
++                        list[sorted + i] = slice[i];
++                    }
++                }
++                else {
++                    this.prng.shuffle(list, sorted, sorted + nextIndexes.length);
++                }
+             }
+             sorted += nextIndexes.length;
+         }
+@@ -2089,11 +2138,47 @@ class Battle {
+         this.event.modifier = 1;
+         return relayVar;
+     }
++    isBadRNG(sideN) {
++        return sideN === 0 ? this.P1BadRNG : this.P2BadRNG;
++    }
++    isGoodRNG(sideN) {
++        return sideN === 0 ? this.P1GoodRNG : this.P2GoodRNG;
++    }
++    isQuantizedRNG(sideN) {
++        return sideN === 0 ? this.P1QuantizedRNG : this.P2QuantizedRNG;
++    }
++    isForceCrit(sideN) {
++        return sideN === 0 ? this.P1ForceCrit : this.P2ForceCrit;
++    }
++    isNoCrit(sideN) {
++        return sideN === 0 ? this.P1NoCrit : this.P2NoCrit;
++    }
++    isForceHit(sideN) {
++        return sideN === 0 ? this.P1ForceHit : this.P2ForceHit;
++    }
++    isForceMiss(sideN) {
++        return sideN === 0 ? this.P1ForceMiss : this.P2ForceMiss;
++    }
++    isForceEffect(sideN) {
++        return sideN === 0 ? this.P1ForceEffect : this.P2ForceEffect;
++    }
++    isNoEffect(sideN) {
++        return sideN === 0 ? this.P1NoEffect : this.P2NoEffect;
++    }
+     getCategory(move) {
+         return this.dex.moves.get(move).category || 'Physical';
+     }
+     randomizer(baseDamage) {
+         const tr = this.trunc;
++        if (this.activePokemon) {
++            const sideN = this.activePokemon.side.n;
++            if (this.isGoodRNG(sideN)) return tr(tr(baseDamage * 100) / 100);
++            if (this.isBadRNG(sideN)) return tr(tr(baseDamage * 85) / 100);
++            if (this.isQuantizedRNG(sideN)) {
++                const rolls = [100, 95, 90, 85];
++                return tr(tr(baseDamage * rolls[this.random(4)]) / 100);
++            }
++        }
+         return tr(tr(baseDamage * (100 - this.random(16))) / 100);
+     }
+     /**
+@@ -2447,6 +2532,9 @@ class Battle {
+                     maxMove: action.maxMove, originalTarget: action.originalTarget,
+                 });
+                 break;
++            case 'item':
++                this.actions.useItem(action);
++                break;
+             case 'megaEvo':
+                 this.actions.runMegaEvo(action.pokemon);
+                 break;
+diff --git a/node_modules/@pkmn/sim/build/cjs/sim/dex-items.js b/node_modules/@pkmn/sim/build/cjs/sim/dex-items.js
+index 8080645..10e8f32 100644
+--- a/node_modules/@pkmn/sim/build/cjs/sim/dex-items.js
++++ b/node_modules/@pkmn/sim/build/cjs/sim/dex-items.js
+@@ -23,6 +23,7 @@ class Item extends dex_data_1.BasicEffect {
+         this.isGem = !!data.isGem;
+         this.isPokeball = !!data.isPokeball;
+         this.isPrimalOrb = !!data.isPrimalOrb;
++        this.bagUse = data.bagUse || void 0;
+         if (!this.gen) {
+             if (this.num >= 1124) {
+                 this.gen = 9;
+diff --git a/node_modules/@pkmn/sim/build/cjs/sim/pokemon.js b/node_modules/@pkmn/sim/build/cjs/sim/pokemon.js
+index 509ae0f..dbf8fc3 100644
+--- a/node_modules/@pkmn/sim/build/cjs/sim/pokemon.js
++++ b/node_modules/@pkmn/sim/build/cjs/sim/pokemon.js
+@@ -296,6 +296,9 @@ class Pokemon {
+             stat = Math.floor(stat / boostTable[-boost]);
+         }
+         // stat modifier
++        if (this.side.n === 0 && this.battle[statName + 'Boost']) {
++            stat = Math.floor(stat * 1.1);
++        }
+         return this.battle.modify(stat, (modifier || 1));
+     }
+     getStat(statName, unboosted, unmodified) {
+@@ -338,6 +341,9 @@ class Pokemon {
+         }
+         if (statName === 'spe' && stat > 10000 && !this.battle.format.battle?.trunc)
+             stat = 10000;
++        if (!unmodified && this.side.n === 0 && this.battle[statName + 'Boost']) {
++            stat = Math.floor(stat * 1.1);
++        }
+         return stat;
+     }
+     getActionSpeed() {
+diff --git a/node_modules/@pkmn/sim/build/cjs/sim/side.js b/node_modules/@pkmn/sim/build/cjs/sim/side.js
+index 85384f7..f92b297 100644
+--- a/node_modules/@pkmn/sim/build/cjs/sim/side.js
++++ b/node_modules/@pkmn/sim/build/cjs/sim/side.js
+@@ -1000,6 +1000,14 @@ class Side {
+                     if (!this.choosePass())
+                         return false;
+                     break;
++                case 'item': {
++                    const spaceIdx = data.indexOf(' ');
++                    const itemText = spaceIdx >= 0 ? data.slice(0, spaceIdx) : data;
++                    const slotText = spaceIdx >= 0 ? data.slice(spaceIdx + 1) : undefined;
++                    if (!this.chooseItem(itemText, slotText))
++                        return false;
++                    break;
++                }
+                 case 'auto':
+                 case 'default':
+                     this.autoChoose();
+@@ -1107,6 +1115,40 @@ class Side {
+         this.foe = null;
+         this.battle = null;
+     }
++    chooseItem(itemText, slotText) {
++        if (this.requestState !== 'move') {
++            return this.emitChoiceError(`Can't use item: You need a ${this.requestState} response`);
++        }
++        const index = this.getChoiceIndex();
++        if (index >= this.active.length) {
++            return this.emitChoiceError(`Can't use item: You sent more choices than unfainted Pokémon`);
++        }
++        const pokemon = this.active[index];
++        const item = this.battle.dex.items.get(itemText);
++        if (!item.exists || !item.bagUse) {
++            return this.emitChoiceError(`Can't use item: Item '${itemText}' has no bag effect`);
++        }
++        let targetSlot = 0;
++        if (slotText !== undefined) {
++            targetSlot = parseInt(slotText, 10);
++            if (isNaN(targetSlot) || targetSlot < 0 || targetSlot >= this.pokemon.length) {
++                return this.emitChoiceError(`Can't use item: Invalid target slot '${slotText}'`);
++            }
++        }
++        const target = this.pokemon[targetSlot];
++        if (target.fainted) {
++            return this.emitChoiceError(`Can't use item: Target has fainted`);
++        }
++        const bagUse = item.bagUse;
++        const willHeal = bagUse.heal && target.hp < target.maxhp;
++        const willCure = (bagUse.cureStatus && target.status) ||
++            (bagUse.cureStatusList && bagUse.cureStatusList.includes(target.status));
++        if (!willHeal && !willCure) {
++            return this.emitChoiceError(`Can't use item: Item would have no effect`);
++        }
++        this.choice.actions.push({ choice: 'item', pokemon, target, itemid: item.id, item });
++        return true;
++    }
+ }
+ exports.Side = Side;
+ //# sourceMappingURL=side.js.map
+\ No newline at end of file

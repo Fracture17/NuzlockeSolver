@@ -10,7 +10,12 @@ else:
     ROM_PATH    = "/home/Fracture/Downloads/emerald.gba"
     SAVE_FILE   = "/home/Fracture/Downloads/emerald.sav"
 
-NODE_SCRIPT = "/home/Fracture/WebstormProjects/pokemon-showdown-master/Connection.js"
+# Prefer the simulator bundled in showdown/ (needs `npm install` there first);
+# fall back to an external pokemon-showdown checkout.
+_showdown_bundled = _os.path.join(_os.path.dirname(__file__), 'showdown')
+NODE_SCRIPT = _os.path.join(_showdown_bundled, 'Connection.js') \
+    if _os.path.exists(_os.path.join(_showdown_bundled, 'node_modules')) else \
+    "/home/Fracture/WebstormProjects/pokemon-showdown-master/Connection.js"
 
 # Prefer mgba_build/ bundled inside this project; fall back to a system build path.
 _mgba_bundled   = _os.path.join(_os.path.dirname(__file__), 'mgba_build')

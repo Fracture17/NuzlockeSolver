@@ -37,3 +37,6 @@ debug.ndjson
 test_logs/*
 # mGBA savestates — ROM memory dumps, never committed.
 savestates/
+
+# Showdown simulator deps — restore with `npm install` in showdown/
+showdown/node_modules/

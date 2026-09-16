@@ -70,6 +70,16 @@ Python talks to it over a raw subprocess pipe with 4-byte length-prefixed JSON f
 websockets, no Showdown server. The battle is serialized to JSON every turn, so the simulator is
 stateless between calls and any position can be forked or replayed.
 
+Everything custom lives in [`showdown/`](showdown/) — the patch itself, `Connection.js` (the IPC
+bridge), the gen-3 data extractors, and [`EDITS.md`](showdown/EDITS.md), which documents every
+custom battle-object field and RNG control flag. Upstream Showdown is *not* vendored; `npm install`
+pulls `@pkmn/sim` at the pinned version and `patch-package` reapplies the diff via a postinstall
+hook:
+
+```bash
+cd showdown && npm install
+```
+
 ## The search
 
 A depth-limited expectimax-flavoured tree with **stratified importance sampling** — not MCTS,
