@@ -35,3 +35,5 @@ raw_data/*
 debug.ndjson
 
 test_logs/*
+# mGBA savestates — ROM memory dumps, never committed.
+savestates/
