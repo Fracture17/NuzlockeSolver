@@ -1,5 +1,12 @@
 # NuzlockeSolver
 
+![Playing the Emerald Champion](docs/demo.gif)
+
+*Beating Wallace, the Pokémon Emerald Champion. **Left:** the search reporting sampled states,
+deduplication counts, per-action scores and its chosen move — including the opponent's move
+probabilities, produced by a port of the game's own trainer AI. **Right:** the live emulator being
+driven by injected button presses.*
+
 An autopilot for **Pokémon Emerald**. It runs the ROM inside an embedded mGBA, reads live battle
 state directly out of GBA memory, mirrors that state into a customized Pokémon Showdown simulator,
 searches over the player's options while modelling the opponent with a reimplementation of the real
